@@ -1,0 +1,42 @@
+exchange:
+  name: bitget
+  base_url: "https://api.bitget.com"
+  ws_public: "wss://ws.bitget.com/v2/ws/public"
+  ws_private: "wss://ws.bitget.com/v2/ws/private"
+
+symbols:
+  spot: { instType: "SPOT", symbol: "ETHUSDT" }
+  perp:
+    instType: "USDT-FUTURES"
+    symbol: "ETHUSDT"
+    productType: "USDT-FUTURES"
+    marginMode: "isolated"
+    marginCoin: "USDT"
+
+risk:
+  stale_sec: 2.0
+  max_unhedged_sec: 2.0
+  max_unhedged_notional: 200
+  max_position_notional: 2000
+  cooldown_sec: 30
+
+strategy:
+  enable_only_positive_funding: true
+  min_funding_rate: 0.00002
+  target_notional: 500
+  delta_tolerance: 0.01
+  obi_levels: 5
+  alpha_obi_bps: 1.0
+  gamma_inventory_bps: 2.0
+  base_half_spread_bps: 2.0
+  quote_refresh_ms: 250
+  dry_run: true
+
+hedge:
+  use_spot_limit_ioc: true
+  hedge_aggressive_bps: 5.0
+
+cost:
+  fee_maker_perp_bps: 1.0
+  fee_taker_spot_bps: 6.0
+  slippage_bps: 3.0

@@ -1,0 +1,29 @@
+[tool.poetry]
+name = "bitget-mm-obi-funding"
+version = "0.1.0"
+description = "Bitget ETH spot/perp market-making + orderbook imbalance + funding bias (MVP)"
+authors = ["you <you@example.com>"]
+readme = "README.md"
+packages = [{ include = "bot" }]
+
+[tool.poetry.dependencies]
+python = ">=3.11,<4.0"
+pybotters = "^1.10.0"
+python-dotenv = "^1.0.1"
+orjson = "^3.10.0"
+pyyaml = "^6.0.2"
+
+[tool.poetry.group.dev.dependencies]
+ruff = "^0.8.0"
+
+[tool.poetry.scripts]
+bitget-ws = "bot.apps.bitget_ws_bbo_obi:main"
+bitget-mm = "bot.apps.bitget_mm_obi_funding_mvp:main"
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
