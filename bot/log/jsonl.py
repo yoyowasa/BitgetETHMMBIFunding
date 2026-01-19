@@ -5,6 +5,8 @@ import os
 import time
 from typing import Any
 
+_REQUIRED_FIELDS = ("event", "intent", "source", "mode", "reason", "leg", "cycle_id")
+
 
 class JsonlLogger:
     def __init__(self, path: str):
@@ -12,6 +14,13 @@ class JsonlLogger:
         os.makedirs(os.path.dirname(path), exist_ok=True)
 
     def log(self, record: dict[str, Any]) -> None:
+        missing = []
+        for key in _REQUIRED_FIELDS:
+            if key not in record:
+                record[key] = None
+                missing.append(key)
+        if missing:
+            record["warn_missing"] = missing
         if "ts" not in record:
             record["ts"] = time.time()
         line = json.dumps(record, ensure_ascii=True)

@@ -82,6 +82,9 @@ class Settings:
     hedge_ioc_slip_bps: float = float(os.getenv("HEDGE_IOC_SLIP_BPS", "5.0"))
     max_unhedged_notional: float = float(os.getenv("MAX_UNHEDGED_NOTIONAL", "200.0"))
     max_unhedged_sec: float = float(os.getenv("MAX_UNHEDGED_SEC", "2.0"))
+    max_position_notional: float = float(os.getenv("MAX_POSITION_NOTIONAL", "0"))
+    stale_sec: float = float(os.getenv("STALE_SEC", "2.0"))
+    cooldown_sec: float = float(os.getenv("COOLDOWN_SEC", "0"))
 
     # 疑似約定（dry-run 検証用）
     simulate_fills: bool = os.getenv("SIMULATE_FILLS", "0") == "1"
@@ -292,7 +295,16 @@ class BitgetRest:
                     reason="funding_rate",
                     leg="perp",
                 )
-            return float(j["data"][0]["fundingRate"])
+            data = j.get("data")
+            if isinstance(data, list):
+                row = data[0] if data else None
+            elif isinstance(data, dict):
+                row = data
+            else:
+                row = None
+            if not row or "fundingRate" not in row:
+                return None
+            return float(row["fundingRate"])
         except Exception:
             return None
 
@@ -370,20 +382,62 @@ def book_sorted(store: pybotters.BitgetV2DataStore, inst_type: str, inst_id: str
     return store.book.sorted({"instType": inst_type, "instId": inst_id}, limit=limit)
 
 
+def _book_float(value) -> Optional[float]:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _book_price(row: dict) -> Optional[float]:
+    if isinstance(row, (list, tuple)) and len(row) >= 1:
+        return _book_float(row[0])
+    if isinstance(row, dict):
+        return _book_float(row.get("price") or row.get("px"))
+    return None
+
+
+def _book_amount(row: dict) -> Optional[float]:
+    if isinstance(row, (list, tuple)) and len(row) >= 2:
+        return _book_float(row[1])
+    if isinstance(row, dict):
+        return _book_float(row.get("amount") or row.get("size") or row.get("qty") or row.get("sz"))
+    return None
+
+
+def _book_ts_ms(*rows_list: list[dict]) -> Optional[int]:
+    ts_val = None
+    for rows in rows_list:
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            raw = row.get("ts") or row.get("timestamp") or row.get("time")
+            ts = _book_float(raw)
+            if ts is None:
+                continue
+            if ts > 1e12:
+                ts_val = ts if ts_val is None else max(ts_val, ts)
+            else:
+                ts_ms = ts * 1000.0
+                ts_val = ts_ms if ts_val is None else max(ts_val, ts_ms)
+    return int(ts_val) if ts_val is not None else None
+
+
 def bbo_obi_from_sorted(book: dict, levels: int) -> tuple[BBO, float]:
     bids = book.get("bids") or []
     asks = book.get("asks") or []
-    bid = float(bids[0]["price"]) if bids else None
-    ask = float(asks[0]["price"]) if asks else None
-    bid_sz = float(bids[0]["amount"]) if bids else None
-    ask_sz = float(asks[0]["amount"]) if asks else None
+    bid = _book_price(bids[0]) if bids else None
+    ask = _book_price(asks[0]) if asks else None
+    bid_sz = _book_amount(bids[0]) if bids else None
+    ask_sz = _book_amount(asks[0]) if asks else None
 
-    bsum = sum(float(x["amount"]) for x in bids[:levels]) if bids else 0.0
-    asum = sum(float(x["amount"]) for x in asks[:levels]) if asks else 0.0
+    bsum = sum(_book_amount(x) or 0.0 for x in bids[:levels]) if bids else 0.0
+    asum = sum(_book_amount(x) or 0.0 for x in asks[:levels]) if asks else 0.0
     denom = bsum + asum
     obi = 0.0 if denom <= 0 else (bsum - asum) / denom
 
-    return BBO(bid=bid, ask=ask, bid_sz=bid_sz, ask_sz=ask_sz, ts_ms=now_ms()), obi
+    ts_ms = _book_ts_ms(bids, asks) or now_ms()
+    return BBO(bid=bid, ask=ask, bid_sz=bid_sz, ask_sz=ask_sz, ts_ms=ts_ms), obi
 
 
 # -----------------------------
@@ -486,6 +540,7 @@ class OMS:
 
         # ヘッジ追跡: clientOid -> deadline
         self.pending_hedge: dict[str, int] = {}
+        self.unhedged_since_ms: Optional[int] = None
 
     def mk_client_oid(self, prefix: str, cycle_id: int, leg: str, side: str) -> str:
         # 長さ制限に備えて短くする
@@ -870,6 +925,19 @@ class OMS:
         # デルタ ≒ spot_pos + perp_pos
         return abs(self.spot_pos + self.perp_pos) * mid
 
+    def update_unhedged_timer(self) -> None:
+        delta = self.spot_pos + self.perp_pos
+        if abs(delta) <= 1e-9:
+            self.unhedged_since_ms = None
+        elif self.unhedged_since_ms is None:
+            self.unhedged_since_ms = now_ms()
+
+    def prune_pending_hedges(self, now_ts_ms: int) -> list[str]:
+        expired = [coid for coid, deadline in self.pending_hedge.items() if deadline <= now_ts_ms]
+        for coid in expired:
+            self.pending_hedge.pop(coid, None)
+        return expired
+
 
 # -----------------------------
 # 戦略（PERP 板 + 資金調達率バイアス）
@@ -879,6 +947,15 @@ class Strategy:
         self.s = s
         self.funding: Optional[float] = None
         self.mode: str = "IDLE"
+        self.cooldown_until_ms: int = 0
+
+    def in_cooldown(self, now_ts_ms: int) -> bool:
+        return now_ts_ms < self.cooldown_until_ms
+
+    def set_cooldown(self, now_ts_ms: int) -> None:
+        if self.s.cooldown_sec <= 0:
+            return
+        self.cooldown_until_ms = now_ts_ms + int(self.s.cooldown_sec * 1000)
 
     def compute_quotes(self, perp_bbo: BBO, obi: float, perp_pos: float) -> Optional[tuple[float, float]]:
         if perp_bbo.bid is None or perp_bbo.ask is None:
@@ -1067,6 +1144,11 @@ async def main_async() -> None:
                 oms.perp_pos += qty if side == "buy" else -qty
             else:
                 oms.spot_pos += qty if side == "buy" else -qty
+                coid = str(e.get("clientOid") or "")
+                if coid in oms.pending_hedge:
+                    oms.pending_hedge.pop(coid, None)
+
+            oms.update_unhedged_timer()
 
             # PERP のクオート約定なら SPOT ヘッジ
             coid = str(e.get("clientOid") or "")
@@ -1184,6 +1266,13 @@ async def main_async() -> None:
         async def strategy_loop() -> None:
             while True:
                 await asyncio.sleep(s.refresh_ms / 1000.0)
+                now_ts_ms = now_ms()
+
+                if strat.in_cooldown(now_ts_ms):
+                    strat.mode = "COOLDOWN"
+                    await oms.cancel_quotes(reason="cooldown", source="risk")
+                    log.write("state", mode=strat.mode, reason="cooldown")
+                    continue
 
                 # 板スナップショット（books5）
                 perp_book = book_sorted(store, s.perp_inst, s.symbol, limit=s.obi_levels)
@@ -1191,6 +1280,20 @@ async def main_async() -> None:
 
                 perp_bbo, obi = bbo_obi_from_sorted(perp_book, s.obi_levels)
                 spot_bbo, _ = bbo_obi_from_sorted(spot_book, 1)
+
+                if s.stale_sec > 0:
+                    stale_ms = int(s.stale_sec * 1000)
+                    if (now_ts_ms - perp_bbo.ts_ms) > stale_ms or (now_ts_ms - spot_bbo.ts_ms) > stale_ms:
+                        strat.mode = "IDLE"
+                        await oms.cancel_quotes(reason="stale_book", source="risk")
+                        log.write(
+                            "state",
+                            mode=strat.mode,
+                            reason="stale_book",
+                            perp_ts_ms=perp_bbo.ts_ms,
+                            spot_ts_ms=spot_bbo.ts_ms,
+                        )
+                        continue
 
                 fr = strat.funding
                 if fr is None or abs(fr) < s.min_abs_funding:
@@ -1222,7 +1325,51 @@ async def main_async() -> None:
                         unhedged_notional=unhedged,
                         max=s.max_unhedged_notional,
                     )
+                    strat.set_cooldown(now_ts_ms)
                     continue
+
+                expired = oms.prune_pending_hedges(now_ts_ms)
+                if expired:
+                    await oms.cancel_quotes(reason="hedge_timeout", source="risk")
+                    log.write(
+                        "risk",
+                        kind="hedge_timeout",
+                        expired=len(expired),
+                        unhedged_notional=unhedged,
+                        max_sec=s.max_unhedged_sec,
+                    )
+                    strat.set_cooldown(now_ts_ms)
+                    continue
+
+                if (
+                    oms.unhedged_since_ms is not None
+                    and (now_ts_ms - oms.unhedged_since_ms) > (s.max_unhedged_sec * 1000)
+                ):
+                    await oms.cancel_quotes(reason="unhedged_timeout", source="risk")
+                    log.write(
+                        "risk",
+                        kind="unhedged_timeout",
+                        unhedged_notional=unhedged,
+                        unhedged_ms=(now_ts_ms - oms.unhedged_since_ms),
+                        max_sec=s.max_unhedged_sec,
+                    )
+                    strat.set_cooldown(now_ts_ms)
+                    continue
+
+                if s.max_position_notional > 0 and mid is not None:
+                    spot_notional = abs(oms.spot_pos) * mid
+                    perp_notional = abs(oms.perp_pos) * mid
+                    if spot_notional > s.max_position_notional or perp_notional > s.max_position_notional:
+                        await oms.cancel_quotes(reason="max_position", source="risk")
+                        log.write(
+                            "risk",
+                            kind="max_position",
+                            spot_notional=spot_notional,
+                            perp_notional=perp_notional,
+                            max=s.max_position_notional,
+                        )
+                        strat.set_cooldown(now_ts_ms)
+                        continue
 
                 cycle_id = int(now_ms() & 0xFFFFFFFF)
                 await oms.set_quotes(cycle_id, bid_px, ask_px, s.quote_size, funding=fr, obi=obi)
@@ -1266,10 +1413,9 @@ async def main_async() -> None:
 
 
 def main() -> None:
-    try:
-        asyncio.run(main_async())
-    except KeyboardInterrupt:
-        pass
+    from ..app import main as app_main
+
+    app_main()
 
 
 if __name__ == "__main__":

@@ -40,6 +40,11 @@ class RiskConfig:
     max_unhedged_notional: float
     max_position_notional: float
     cooldown_sec: float
+    funding_stale_sec: float = 120.0
+    reject_streak_limit: int = 3
+    book_boot_timeout_sec: float | None = None
+    book_stale_sec: float | None = None
+    controlled_reconnect_grace_sec: float = 3.0
 
 
 @dataclass
@@ -60,6 +65,10 @@ class StrategyConfig:
 class HedgeConfig:
     use_spot_limit_ioc: bool
     hedge_aggressive_bps: float
+    hedge_deadline_sec: float = 1.5
+    hedge_max_tries: int = 2
+    hedge_chase_slip_bps: float = 5.0
+    unwind_enable: bool = True
 
 
 @dataclass

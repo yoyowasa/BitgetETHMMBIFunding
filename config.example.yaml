@@ -15,10 +15,15 @@ symbols:
 
 risk:
   stale_sec: 2.0
+  book_boot_timeout_sec: 2.0
+  book_stale_sec: 6.0
+  controlled_reconnect_grace_sec: 3.0
+  funding_stale_sec: 120.0
   max_unhedged_sec: 2.0
   max_unhedged_notional: 200
   max_position_notional: 2000
   cooldown_sec: 30
+  reject_streak_limit: 3
 
 strategy:
   enable_only_positive_funding: true
@@ -35,6 +40,10 @@ strategy:
 hedge:
   use_spot_limit_ioc: true
   hedge_aggressive_bps: 5.0
+  hedge_deadline_sec: 1.5
+  hedge_max_tries: 2
+  hedge_chase_slip_bps: 5.0
+  unwind_enable: true
 
 cost:
   fee_maker_perp_bps: 1.0

@@ -31,6 +31,7 @@ class OrderIntent(str, Enum):
     QUOTE_BID = "QUOTE_BID"
     QUOTE_ASK = "QUOTE_ASK"
     HEDGE = "HEDGE"
+    UNWIND = "UNWIND"
     FLATTEN = "FLATTEN"
 
 

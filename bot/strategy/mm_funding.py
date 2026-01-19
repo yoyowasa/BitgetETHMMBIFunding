@@ -19,6 +19,7 @@ class StrategyState(str, Enum):
     HEDGING = "HEDGING"
     FLATTENING = "FLATTENING"
     COOLDOWN = "COOLDOWN"
+    HALTED = "HALTED"
 
 
 class MMFundingStrategy:
@@ -47,18 +48,70 @@ class MMFundingStrategy:
     async def step(self) -> None:
         self._cycle_id += 1
         now = time.time()
-        spot_snapshot = book_md.snapshot_from_store(
+
+        if self._risk.is_halted():
+            if self._state != StrategyState.HALTED:
+                self._state = StrategyState.HALTED
+                self._oms.fail_open_tickets("halt")
+                await self._oms.cancel_all(reason="halted")
+                self._log_decision(
+                    now,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    "halted",
+                )
+            return
+        if not self._oms.gateway.book_ready:
+            self._state = StrategyState.STOPPED
+            await self._oms.cancel_all(reason="book_not_ready")
+            self._log_decision(
+                now,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                "book_not_ready",
+            )
+            return
+        channel = self._oms.gateway.public_book_channel
+        spot_snapshot, spot_filtered = book_md.snapshot_from_store(
             self._oms.gateway.store,
             InstType.SPOT,
             self._config.symbols.spot.symbol,
             self._config.strategy.obi_levels,
+            channel=channel,
+            return_meta=True,
         )
-        perp_snapshot = book_md.snapshot_from_store(
+        if spot_snapshot is not None and not spot_filtered:
+            self._oms.gateway.note_book_channel_filter_unavailable(
+                InstType.SPOT,
+                self._config.symbols.spot.symbol,
+                channel,
+            )
+        perp_snapshot, perp_filtered = book_md.snapshot_from_store(
             self._oms.gateway.store,
             InstType.USDT_FUTURES,
             self._config.symbols.perp.symbol,
             self._config.strategy.obi_levels,
+            channel=channel,
+            return_meta=True,
         )
+        if perp_snapshot is not None and not perp_filtered:
+            self._oms.gateway.note_book_channel_filter_unavailable(
+                InstType.USDT_FUTURES,
+                self._config.symbols.perp.symbol,
+                channel,
+            )
+        spot_bbo = book_md.bbo_from_snapshot(spot_snapshot) if spot_snapshot else None
+        await self._oms.process_hedge_tickets(spot_bbo)
 
         action = "idle"
         if spot_snapshot is None or perp_snapshot is None:
@@ -67,7 +120,6 @@ class MMFundingStrategy:
             self._log_decision(now, None, None, None, None, None, None, None, action)
             return
 
-        spot_bbo = book_md.bbo_from_snapshot(spot_snapshot)
         perp_bbo = book_md.bbo_from_snapshot(perp_snapshot)
         if self._risk.stale(spot_snapshot.ts, now) or self._risk.stale(
             perp_snapshot.ts, now
@@ -117,6 +169,21 @@ class MMFundingStrategy:
                 None,
                 None,
                 "no_funding",
+            )
+            return
+        if (now - funding.ts) > self._config.risk.funding_stale_sec:
+            self._state = StrategyState.STOPPED
+            await self._oms.cancel_all(reason="funding_stale")
+            self._log_decision(
+                now,
+                spot_bbo,
+                perp_bbo,
+                funding.funding_rate,
+                None,
+                None,
+                None,
+                None,
+                "funding_stale",
             )
             return
 
@@ -263,9 +330,16 @@ class MMFundingStrategy:
         target_q: float | None,
         action: str,
     ) -> None:
+        intent = "quote" if action == "quote" else None
         self._decision_logger.log(
             {
                 "ts": ts,
+                "event": "tick",
+                "intent": intent,
+                "source": "strategy",
+                "mode": self._state.value,
+                "reason": action,
+                "leg": None,
                 "cycle_id": self._cycle_id,
                 "state": self._state.value,
                 "funding_rate": funding_rate,
@@ -279,5 +353,6 @@ class MMFundingStrategy:
                 "pos_perp": self._oms.positions.perp_pos,
                 "delta": self._oms.positions.spot_pos + self._oms.positions.perp_pos,
                 "action": action,
+                "book_channel": self._oms.gateway.public_book_channel,
             }
         )
