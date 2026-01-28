@@ -6,3 +6,46 @@ git commit -m "chore: bulk update after lint & format"
 
 # プッシュ
 git push
+
+# CI: REAL_LOG_CMD 運用メモ
+1) FAILフィクスチャ命名
+   - 失敗理由が一目で分かる名前に揃える
+   - 例: orders_fail_halt_after.jsonl / orders_fail_open_ticket.jsonl
+
+2) REAL_LOG_CMD の安全ガード（必須）
+   - PRでは実行しない（fork PR 対策）
+   - main/protected のみ
+   - schedule か workflow_dispatch(run_real_logs=true) だけ実行
+   - REAL_LOG_CMD が空なら確実にスキップ
+
+3) REAL_LOG_CMD の推奨運用
+   - 文字列コマンドではなく「スクリプト呼び出し」に寄せる
+   - 例: REAL_LOG_CMD=./scripts/run_real_logs.sh → bash -lc "$REAL_LOG_CMD"
+
+4) 実ログ strict の出力先も変数化
+   - REAL_LOG_DIR を用意（例: logs / runtime_logs）
+
+5) 進め方の推奨順
+   - repo variables に REAL_LOG_CMD を設定
+   - まずは安全なコマンド（バックテスト/ドライラン）
+   - 手動 dispatch(run_real_logs=true) で strict を一回確認
+   - 夜間運用が不要なら schedule を削除/頻度ダウン
+
+6) 追加で効くもの
+   - 実ログ strict でも report artifact を always() で残す
+   - ハング対策で timeout を入れる
+
+# ステップ2：設計書は「ログの中身」を規定していて、「ログファイル名」は規定していません
+PDFでは Logger について **「JSONLで構造化ログを吐く」**こと、そして 必須フィールド（ts / event / intent / source / mode / reason / leg / cycle_id / data / res / simulated）を固定することが書かれています。さらに「あなたの現行JSONLを“設計として固定”」とも明記されています。
+この章には mm_*.jsonl のようなファイル名規約や decision.jsonl というファイル名は登場せず、設計上は「ログのレコード形式（必須フィールドが揃うこと）」が主眼です。
+
+投資デルタ・ニュートラルBOT - 市場ニュートラル高頻度戦略
+投資デルタ・ニュートラルBOT - 市場ニュートラル高頻度戦略
+
+つまり、あなたが挙げた
+「厳格検証の必須ファイルが mm_*.jsonl なのに、実運用の decision.jsonl と噛み合わず missing_required_files になりうる」
+という問題は、PDF設計違反というより、リポジトリ側の“厳格検証ルール（必須ファイル名）”と実装（実際に吐いているファイル名）の未整合です（＝設計書はファイル名までは縛っていない）。
+
+投資デルタ・ニュートラルBOT - 市場ニュートラル高頻度戦略
+
+ここまでで止めます。続きを進めるなら 「次」 と送ってください。

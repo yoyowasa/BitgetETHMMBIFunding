@@ -144,11 +144,8 @@ def load_apis(exchange: ExchangeConfig) -> dict:
         raise ValueError("missing Bitget API credentials")
 
     return {
-        "bitget": {
-            "key": key,
-            "secret": secret,
-            "passphrase": passphrase,
-        }
+        # pybotters は [API_KEY, API_SECRET, API_PASSPHRASE] の3要素リストを期待する
+        "bitget": [key, secret, passphrase]
     }
 
 

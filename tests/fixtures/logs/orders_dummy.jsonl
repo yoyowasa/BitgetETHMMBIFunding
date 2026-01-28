@@ -1,0 +1,2 @@
+{"ts":1,"event":"ticket","intent":"HEDGE","source":"bot","mode":"ACTIVE","reason":"ticket_open","leg":"perp","cycle_id":"c1","ticket_id":"t1"}
+{"ts":2,"event":"ticket","intent":"HEDGE","source":"bot","mode":"ACTIVE","reason":"ticket_done","leg":"perp","cycle_id":"c1","ticket_id":"t1"}

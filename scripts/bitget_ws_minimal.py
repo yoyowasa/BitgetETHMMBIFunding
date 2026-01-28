@@ -127,13 +127,8 @@ async def main() -> None:
     if not (key and secret and passphrase):
         raise SystemExit("Set BITGET_API_KEY / BITGET_API_SECRET / BITGET_API_PASSPHRASE")
 
-    apis = {
-        "bitget": {
-            "key": key,
-            "secret": secret,
-            "passphrase": passphrase,
-        }
-    }
+    # pybotters は [API_KEY, API_SECRET, API_PASSPHRASE] の3要素リストを期待する
+    apis = {"bitget": [key, secret, passphrase]}
     store = pybotters.BitgetV2DataStore()
 
     pub_sub = {

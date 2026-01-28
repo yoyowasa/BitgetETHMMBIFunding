@@ -1,0 +1,2 @@
+{"ts":1,"event":"halted","intent":"SYSTEM","source":"bot","mode":"HALTED","reason":"risk","leg":"perp","cycle_id":"c1"}
+{"ts":2,"event":"order_new","intent":"QUOTE_BID","source":"bot","mode":"ACTIVE","reason":"quote","leg":"perp","cycle_id":"c1","client_oid":"QUOTE_BID_1","order_id":"o1"}

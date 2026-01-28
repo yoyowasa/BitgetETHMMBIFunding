@@ -1,9 +1,10 @@
 param(
   [string]$LogDir = "logs",
-  [string]$Out = "artifacts/validate_report.json"
+  [string]$Out = "artifacts/validate_report.json",
+  [string]$RequireFiles = "system*.jsonl,orders*.jsonl,fills*.jsonl,mm_*.jsonl",
+  [double]$ControlledGraceSec = 4,
+  [int]$HedgeMaxTries = 2
 )
-
-$require = "system*.jsonl,orders*.jsonl,fills*.jsonl,mm_*.jsonl"
 
 $artifactDir = Split-Path -Parent $Out
 if ($artifactDir) {
@@ -12,8 +13,8 @@ if ($artifactDir) {
 
 python tools/validate_logs.py $LogDir `
   --json-out $Out `
-  --require-files $require `
+  --require-files $RequireFiles `
   --require-ticket-events `
   --halt-strict `
-  --controlled-grace-sec 6 `
-  --hedge-max-tries 2
+  --controlled-grace-sec $ControlledGraceSec `
+  --hedge-max-tries $HedgeMaxTries

@@ -3,3 +3,5 @@
 __pycache__/
 *.pyc
 logs/
+!tests/fixtures/logs/
+!tests/fixtures/logs/**

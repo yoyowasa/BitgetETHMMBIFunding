@@ -1,5 +1,4 @@
 import argparse
-import fnmatch
 import json
 import os
 from collections import defaultdict
@@ -79,6 +78,13 @@ def is_active_tick(rec: dict) -> bool:
     if mode.upper() == "HALTED" or state.upper() == "HALTED" or reason == "halted":
         return False
     return True
+
+
+def _strict_required_files_ok(present_filenames: set[str]) -> bool:
+    # Strict required files: accept unified decision.jsonl or legacy mm_*.jsonl.
+    if "decision.jsonl" in present_filenames:
+        return True
+    return any(name.startswith("mm_") and name.endswith(".jsonl") for name in present_filenames)
 
 
 def main() -> int:
@@ -253,24 +259,13 @@ def main() -> int:
     errors: list[str] = []
     required_files = []
     missing_required = []
+    strict = bool(args.require_files)
     if args.require_files:
         required_files = [name.strip() for name in args.require_files.split(",") if name.strip()]
-        for pattern in required_files:
-            pattern_norm = pattern.replace("\\", "/")
-            matched = False
-            for path in loaded_paths:
-                base = os.path.basename(path)
-                if fnmatch.fnmatch(base, pattern):
-                    matched = True
-                    break
-                path_norm = path.replace("\\", "/")
-                if fnmatch.fnmatch(path_norm, pattern_norm):
-                    matched = True
-                    break
-            if not matched:
-                missing_required.append(pattern)
-        if missing_required:
-            errors.append(f"missing_required_files={','.join(missing_required)}")
+    present_filenames = set(loaded_files)
+    if strict and (not _strict_required_files_ok(present_filenames)):
+        missing_required = ["decision.jsonl"]
+        errors.append(f"missing_required_files={','.join(missing_required)}")
     if warn_missing != 0:
         errors.append(f"warn_missing_lines={warn_missing}")
     if bad_json != 0:

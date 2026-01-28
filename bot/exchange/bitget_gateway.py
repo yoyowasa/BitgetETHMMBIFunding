@@ -503,6 +503,10 @@ def _parse_spot_constraints(row: dict) -> InstrumentConstraints:
     price_scale = _first_int(row, ["priceScale", "pricePrecision"])
     qty_step = 10 ** (-qty_scale) if qty_scale is not None else 0.0
     tick_size = 10 ** (-price_scale) if price_scale is not None else 0.0
+    # BitgetのSPOTでは minTradeAmount が "0" のことがあるため、
+    # 最小数量は quantityPrecision 由来のステップにフォールバックする
+    if (min_qty is None or min_qty <= 0.0) and qty_step > 0.0:
+        min_qty = qty_step
     return InstrumentConstraints(
         min_qty=min_qty or 0.0,
         qty_step=qty_step,

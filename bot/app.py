@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+from pathlib import Path
 
 import pybotters
 from dotenv import load_dotenv
@@ -38,7 +39,7 @@ async def _run() -> None:
     elif bot_mode == "live":
         config.strategy.dry_run = False
 
-    log_dir = os.getenv("LOG_DIR") or "log"
+    log_dir = Path(os.environ.get("LOG_DIR") or os.environ.get("LOG_PATH") or "logs")  # LOG_PATHは旧env名として互換維持し、LOG_DIRを優先する
     system_logger = JsonlLogger(os.path.join(log_dir, "system.jsonl"))
     orders_logger = JsonlLogger(os.path.join(log_dir, "orders.jsonl"))
     fills_logger = JsonlLogger(os.path.join(log_dir, "fills.jsonl"))
