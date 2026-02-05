@@ -4,6 +4,11 @@ exchange:
   ws_public: "wss://ws.bitget.com/v2/ws/public"
   ws_private: "wss://ws.bitget.com/v2/ws/private"
 
+apis:
+  bitget:
+    - "YOUR_API_KEY"         # BitgetのAPI Key
+    - "YOUR_API_SECRET"      # BitgetのSecret
+    - "YOUR_API_PASSPHRASE"  # BitgetのPassphrase（Bitget側で「password」と呼ばれることもある）
 symbols:
   spot: { instType: "SPOT", symbol: "ETHUSDT" }
   perp:

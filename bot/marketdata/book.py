@@ -1,9 +1,162 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Iterable
 
 from ..types import BBO, BookSnapshot, InstType
+
+def _ws_inst_id(raw_symbol: str) -> str:
+    # 役割: WS購読用のinstIdに正規化する（例: ETHUSDT_UMCBL -> ETHUSDT）
+    return (raw_symbol or "").split("_", 1)[0]
+
+_BOOK_STAT_T0 = time.time()  # 役割: 集計開始時刻（秒）
+_BOOK_STAT_N = 0  # 役割: 集計区間の受信メッセージ数
+_BOOK_STAT_LEVELS = 0  # 役割: 集計区間の（bids+asks）レベル数合計
+_BOOK_READY_EVENTS: dict[tuple[str, str, str], asyncio.Event] = {}  # 役割: (instType, channel, instId)ごとの板ブート到達をラッチする
+_BOOK_FIRST_PUSH_SEEN = set()  # 役割: (instType, channel, instId) 単位で最初の板プッシュだけをログ出しするための集合
+
+
+def _stat_book_msg(logger, msg: dict, *, interval_s: float = 60.0) -> None:
+    # 役割: books の負荷（受信頻度/平均レベル数）を一定間隔でログに出し、重さを数字で判断できるようにする
+    global _BOOK_STAT_T0, _BOOK_STAT_N, _BOOK_STAT_LEVELS
+
+    _BOOK_STAT_N += 1
+
+    levels = 0
+    try:
+        data = msg.get("data")
+        if isinstance(data, list) and data and isinstance(data[0], dict):
+            bids = data[0].get("bids") or []
+            asks = data[0].get("asks") or []
+            if isinstance(bids, list):
+                levels += len(bids)
+            if isinstance(asks, list):
+                levels += len(asks)
+    except Exception:
+        levels = 0
+
+    _BOOK_STAT_LEVELS += levels
+
+    now = time.time()
+    dt = now - _BOOK_STAT_T0
+    if dt >= interval_s:
+        mps = (_BOOK_STAT_N / dt) if dt > 0 else 0.0
+        avg_levels = (_BOOK_STAT_LEVELS / _BOOK_STAT_N) if _BOOK_STAT_N > 0 else 0.0
+        if logger is not None:
+            if hasattr(logger, "info"):
+                logger.info(
+                    "book_rx_rate interval_s=%.1f msgs=%d msgs_per_sec=%.3f avg_levels=%.1f",
+                    dt,
+                    _BOOK_STAT_N,
+                    mps,
+                    avg_levels,
+                )
+            elif hasattr(logger, "log"):
+                logger.log(
+                    {
+                        "event": "book_rx_rate",
+                        "intent": "SYSTEM",
+                        "source": "marketdata",
+                        "mode": "RUN",
+                        "reason": "book_rx_rate",
+                        "leg": "books",
+                        "data": {
+                            "interval_s": round(dt, 3),
+                            "msgs": _BOOK_STAT_N,
+                            "msgs_per_sec": mps,
+                            "avg_levels": avg_levels,
+                        },
+                    }
+                )
+        _BOOK_STAT_T0 = now
+        _BOOK_STAT_N = 0
+        _BOOK_STAT_LEVELS = 0
+
+
+def _latch_book_ready(inst_type: str, channel: str, inst_id: str) -> None:
+    # 役割: snapshot到着をラッチして、wait開始前に届いても取りこぼさない
+    key = (str(inst_type), str(channel), str(inst_id))
+    evt = _BOOK_READY_EVENTS.setdefault(key, asyncio.Event())
+    evt.set()
+
+
+async def _wait_for_book_bootstrap(
+    logger, inst_type: str, channel: str, inst_id: str, timeout_s: float
+) -> bool:
+    # 役割: snapshotがwait開始前に到着しても落ちないように、Eventをラッチとして使ってブート完了を判定する
+    key = (str(inst_type), str(channel), str(inst_id))  # 役割: 購読単位のキー
+    evt = _BOOK_READY_EVENTS.setdefault(key, asyncio.Event())  # 役割: 受信側と同じEventを参照する
+
+    if evt.is_set():
+        return True  # 役割: 既に到着済みなら即OK（取りこぼし防止）
+
+    try:
+        await asyncio.wait_for(evt.wait(), timeout=timeout_s)  # 役割: 到着を待つ
+        return True
+    except asyncio.TimeoutError:
+        return evt.is_set()  # 役割: タイムアウトでも到着済みに変わっていればOK、未到着ならFalse
+
+
+def _is_book_push(msg: dict) -> bool:
+    # 役割: Bitgetの板プッシュを構造で判定する（action文字列の揺れ/欠落に依存しない）
+    arg = msg.get("arg")
+    if not isinstance(arg, dict):
+        return False
+    ch = arg.get("channel")
+    if not isinstance(ch, str) or not ch.startswith("books"):
+        return False
+    data = msg.get("data")
+    if not isinstance(data, list) or not data:
+        return False
+    head = data[0]
+    if not isinstance(head, dict):
+        return False
+    return ("bids" in head) and ("asks" in head)
+
+
+def _log_first_book_push(logger, msg: dict) -> None:
+    # 役割: 最初の板プッシュを1回だけログに出し、未配信か取りこぼしかを確定する
+    arg = msg.get("arg") if isinstance(msg.get("arg"), dict) else {}
+    inst_type = arg.get("instType", "?")
+    channel = arg.get("channel", "?")
+    inst_id = arg.get("instId", "?")
+    key = (str(inst_type), str(channel), str(inst_id))
+    if key in _BOOK_FIRST_PUSH_SEEN:
+        return
+    _BOOK_FIRST_PUSH_SEEN.add(key)
+
+    action = msg.get("action")
+    data0 = msg.get("data")[0] if isinstance(msg.get("data"), list) and msg.get("data") else {}
+    data0_keys = sorted(list(data0.keys())) if isinstance(data0, dict) else []
+    if logger is not None:
+        if hasattr(logger, "info"):
+            logger.info(
+                "book_first_push instType=%s channel=%s instId=%s action=%s data0_keys=%s",
+                inst_type,
+                channel,
+                inst_id,
+                action,
+                data0_keys,
+            )
+        elif hasattr(logger, "log"):
+            logger.log(
+                {
+                    "event": "book_first_push",
+                    "intent": "SYSTEM",
+                    "source": "marketdata",
+                    "mode": "RUN",
+                    "reason": "book_first_push",
+                    "leg": "books",
+                    "data": {
+                        "instType": inst_type,
+                        "channel": channel,
+                        "instId": inst_id,
+                        "action": action,
+                        "data0_keys": data0_keys,
+                    },
+                }
+            )
 
 
 def snapshot_from_store(

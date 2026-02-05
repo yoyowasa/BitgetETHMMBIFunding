@@ -9,6 +9,7 @@ import pybotters
 
 from ..config import AppConfig
 from ..log.jsonl import JsonlLogger
+from ..marketdata import book as book_md
 from ..types import InstType, OrderRequest
 from .constraints import ConstraintsRegistry, InstrumentConstraints
 
@@ -30,7 +31,7 @@ class BitgetGateway:
         self._ws_private = None
         self._logger = logger
         self._ws_disconnect_event = ws_disconnect_event
-        self._public_book_channel = "books5"
+        self._public_book_channel = "books"
         self._book_filter_warned: set[tuple[str, str]] = set()
         self._book_ready_event = asyncio.Event()
         self._controlled_reconnect_until_ms = 0
@@ -41,15 +42,42 @@ class BitgetGateway:
         spot = self.config.symbols.spot
         perp = self.config.symbols.perp
         channel = self._public_book_channel
+        spot_inst_id = book_md._ws_inst_id(spot.symbol)
+        perp_inst_id = book_md._ws_inst_id(perp.symbol)
+        self._log(
+            "book_ws_subscribe",
+            intent="SYSTEM",
+            source="ws_public",
+            mode="INIT",
+            reason="book_ws_subscribe",
+            leg="books",
+            inst_type=spot.instType,
+            channel=channel,
+            inst_id=spot_inst_id,
+            raw_symbol=spot.symbol,
+        )
+        self._log(
+            "book_ws_subscribe",
+            intent="SYSTEM",
+            source="ws_public",
+            mode="INIT",
+            reason="book_ws_subscribe",
+            leg="books",
+            inst_type=perp.instType,
+            channel=channel,
+            inst_id=perp_inst_id,
+            raw_symbol=perp.symbol,
+        )
         args = [
-            {"instType": spot.instType, "channel": channel, "instId": spot.symbol},
-            {"instType": perp.instType, "channel": channel, "instId": perp.symbol},
+            {"instType": spot.instType, "channel": channel, "instId": spot_inst_id},
+            {"instType": perp.instType, "channel": channel, "instId": perp_inst_id},
         ]
         payload = {"op": "subscribe", "args": args}
         self._ws_public = await self._client.ws_connect(
             self.config.exchange.ws_public,
             send_json=payload,
-            data_store=self.store,
+            hdlr_json=self._on_ws_message,
+            auth=None,
         )
 
     async def start_private_ws(self) -> None:
@@ -66,8 +94,29 @@ class BitgetGateway:
         self._ws_private = await self._client.ws_connect(
             self.config.exchange.ws_private,
             send_json=payload,
-            data_store=self.store,
+            hdlr_json=self._on_ws_message,
         )
+
+    def _on_ws_message(self, msg: dict, ws=None) -> None:
+        self.store.onmessage(msg, ws)
+        if isinstance(msg, dict) and ("event" in msg or "op" in msg):
+            self._log(
+                "ws_control_message",
+                intent="SYSTEM",
+                source="ws",
+                mode="RUN",
+                reason="ws_control_message",
+                leg="books",
+                data={"message": msg},
+            )
+        if book_md._is_book_push(msg):
+            book_md._log_first_book_push(self._logger, msg)
+            arg = msg.get("arg") if isinstance(msg.get("arg"), dict) else {}
+            inst_type = arg.get("instType", "?")
+            channel = arg.get("channel", "?")
+            inst_id = arg.get("instId", "?")
+            book_md._latch_book_ready(inst_type, channel, inst_id)
+            book_md._stat_book_msg(self._logger, msg)
 
     async def run_public_ws(self, reconnect_delay: float = 3.0) -> None:
         book_timeout_sec = self.config.risk.book_boot_timeout_sec
@@ -78,9 +127,7 @@ class BitgetGateway:
                 else self.config.risk.stale_sec
             )
             book_timeout_sec = max(3.0, stale_sec * 2)
-        primary_channel = "books5"
-        fallback_channel = "books"
-        current_channel = primary_channel
+        current_channel = "books"
         while True:
             try:
                 self._public_book_channel = current_channel
@@ -91,51 +138,12 @@ class BitgetGateway:
                     book_timeout_sec, channel=current_channel
                 )
                 if not ready:
-                    if current_channel == primary_channel:
-                        self._log(
-                            "book_fallback",
-                            intent="SYSTEM",
-                            source="ws_public",
-                            mode="INIT",
-                            reason="book_fallback",
-                            leg="books",
-                            cycle_id=None,
-                            from_channel=primary_channel,
-                            to_channel=fallback_channel,
-                        )
-                        self._enter_controlled_reconnect("book_fallback")
-                        if self._book_channel_filter_supported is False:
-                            cleared, error = await self._clear_book_store()
-                            self._log(
-                                "book_store_cleared",
-                                intent="SYSTEM",
-                                source="ws_public",
-                                mode="INIT",
-                                reason="filter_unavailable",
-                                leg="books",
-                                cycle_id=None,
-                                channel=current_channel,
-                                cleared=cleared,
-                                error=error,
-                            )
-                        self._public_book_channel = fallback_channel
-                        self._book_ready_event.clear()
-                        await self._unsubscribe_public_books(current_channel)
-                        current_channel = fallback_channel
-                        await self._close_public_ws()
-                        self._log(
-                            "ws_disconnect_controlled",
-                            scope="public",
-                            reason=self._controlled_reconnect_reason,
-                        )
-                        await asyncio.sleep(reconnect_delay)
-                        continue
                     self._log(
-                        "book_fallback_failed",
-                        intent="RISK",
+                        "book_boot_timeout",
+                        intent="SYSTEM",
                         source="ws_public",
-                        mode="HALTING",
-                        reason="book_fallback_failed",
+                        mode="INIT",
+                        reason="book_boot_timeout",
                         leg="books",
                         cycle_id=None,
                         channel=current_channel,
@@ -454,18 +462,18 @@ class BitgetGateway:
         return False, "unsupported"
 
     async def _wait_for_book_bootstrap(self, timeout_sec: float, channel: str) -> bool:
-        book_store = getattr(self.store, "book", None)
-        wait = getattr(book_store, "wait", None)
-        if callable(wait):
-            try:
-                await asyncio.wait_for(wait(), timeout=timeout_sec)
-            except asyncio.TimeoutError:
-                return False
         spot = self.config.symbols.spot
         perp = self.config.symbols.perp
-        return self._book_ready(
-            spot.instType, spot.symbol, channel=channel
-        ) and self._book_ready(perp.instType, perp.symbol, channel=channel)
+        spot_inst_id = book_md._ws_inst_id(spot.symbol)
+        perp_inst_id = book_md._ws_inst_id(perp.symbol)
+        spot_task = book_md._wait_for_book_bootstrap(
+            self._logger, spot.instType, channel, spot_inst_id, timeout_sec
+        )
+        perp_task = book_md._wait_for_book_bootstrap(
+            self._logger, perp.instType, channel, perp_inst_id, timeout_sec
+        )
+        spot_ready, perp_ready = await asyncio.gather(spot_task, perp_task)
+        return spot_ready and perp_ready
 
     def _book_ready(self, inst_type: str, symbol: str, channel: str) -> bool:
         book_store = getattr(self.store, "book", None)
