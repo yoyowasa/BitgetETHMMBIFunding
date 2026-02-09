@@ -4,5 +4,7 @@
 __pycache__/
 *.pyc
 logs/
+runtime_logs/
+artifacts/
 !tests/fixtures/logs/
 !tests/fixtures/logs/**

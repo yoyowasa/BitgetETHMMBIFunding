@@ -51,6 +51,34 @@ copy config.example.yaml config.yaml
 python -m bot.app --config config.yaml
 ```
 
+Near-live validation (Windows, safe):
+
+```powershell
+.\scripts\run_near_live_validation.ps1 -DurationSec 180 -PrivateMode auto
+```
+
+Order-fill + provisional PnL validation (dry-run simulation):
+
+```powershell
+.\scripts\run_near_live_validation.ps1 `
+  -DurationSec 180 `
+  -PrivateMode private `
+  -EnableFillSimulation `
+  -SimFillIntervalSec 3 `
+  -SimFillQty 0.01 `
+  -SimFillSide both `
+  -MinFills 4 `
+  -RequirePnl
+```
+
+`PrivateMode` options:
+- `auto`: uses `public` when another `bot.app` process exists, otherwise `private`
+- `public`: forces private API off (`FORCE_PRIVATE_OFF=1`) to avoid account-side impact
+- `private`: enables private WS path (fails fast if another `bot.app` is running)
+
+This always uses `scripts/run_real_logs.ps1`, forces `DRY_RUN=1`, writes logs under
+`runtime_logs/<RUN_ID>`, and runs strict validation into `artifacts/near_live_validate_<RUN_ID>.json`.
+
 Legacy env flags:
 
 - `BOT_MODE` (dry or live)

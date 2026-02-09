@@ -1,6 +1,19 @@
 cd C:\BOT\BitgetETHMMBIFunding
 .\.venv\Scripts\Activate.ps1
 
+# 近リアル運用検証（実装済み）
+# 安全に近リアル検証（既存bot.appが動いていれば自動でpublicモード）
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run_near_live_validation.ps1 -DurationSec 180 -PrivateMode auto
+
+# private経路まで含めて検証（他のbot.app稼働中はエラーで停止）
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run_near_live_validation.ps1 -DurationSec 180 -PrivateMode private
+
+# 約定 + 仮PNL検証（dry-run疑似約定）
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run_near_live_validation.ps1 -DurationSec 180 -PrivateMode private -EnableFillSimulation -SimFillIntervalSec 3 -SimFillQty 0.01 -SimFillSide both -MinFills 4 -RequirePnl
+
+# 監視（異常系イベントだけ追う）
+Get-Content .\runtime_logs\<RUN_ID>\system.jsonl -Wait | Select-String '"event":"(preflight_failed|halted|ws_disconnect|startup_cancel_all_failed|private_disabled)"'
+
 # ステージ：作業ツリーの全変更（追加・更新・削除）を一括
 git add -A
 
@@ -37,6 +50,7 @@ git push
 6) 追加で効くもの
    - 実ログ strict でも report artifact を always() で残す
    - ハング対策で timeout を入れる
+7) 禁止事項（必須）: bot.app を直接起動しない（必ず scripts/run_real_logs.ps1 経由。多重起動・DRY_RUN不整合・ログ欠落の再発防止）
 
 # ステップ2：設計書は「ログの中身」を規定していて、「ログファイル名」は規定していません
 PDFでは Logger について **「JSONLで構造化ログを吐く」**こと、そして 必須フィールド（ts / event / intent / source / mode / reason / leg / cycle_id / data / res / simulated）を固定することが書かれています。さらに「あなたの現行JSONLを“設計として固定”」とも明記されています。

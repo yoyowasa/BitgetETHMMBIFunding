@@ -117,6 +117,24 @@ class OMS:
     def unhedged_since(self) -> Optional[float]:
         return self._unhedged_since
 
+    def latest_open_ticket_id(self) -> Optional[str]:
+        latest: Optional[HedgeTicket] = None
+        for ticket in self._hedge_tickets.values():
+            if ticket.status != "OPEN":
+                continue
+            if latest is None or ticket.created_ts > latest.created_ts:
+                latest = ticket
+        return None if latest is None else latest.ticket_id
+
+    async def ingest_fill(
+        self,
+        event: ExecutionEvent,
+        *,
+        simulated: bool = False,
+        source: str = "exchange",
+    ) -> None:
+        await self._handle_fill(event, simulated=simulated, source=source)
+
     async def update_quotes(
         self,
         bid_px: float,
@@ -234,7 +252,7 @@ class OMS:
                 if dedupe_key in self._seen_fills:
                     continue
                 self._seen_fills.add(dedupe_key)
-                await self._handle_fill(event)
+                await self.ingest_fill(event, simulated=False, source="ws_private_fill")
             await asyncio.sleep(poll_interval)
 
     async def process_hedge_tickets(
@@ -312,7 +330,13 @@ class OMS:
             )
             self._cleanup_ticket(ticket_id)
 
-    async def _handle_fill(self, event: ExecutionEvent) -> None:
+    async def _handle_fill(
+        self,
+        event: ExecutionEvent,
+        *,
+        simulated: bool = False,
+        source: str = "exchange",
+    ) -> None:
         if event.order_id and event.client_oid:
             self._order_client_map[event.order_id] = event.client_oid
         ticket_id = self._ticket_id_from_event(event)
@@ -332,6 +356,8 @@ class OMS:
                 "fee": event.fee,
                 "intent": None if intent is None else intent.value,
                 "ticket_id": ticket_id,
+                "source": source,
+                "simulated": simulated,
             }
         )
         self._positions.apply_fill(event)

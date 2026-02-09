@@ -71,6 +71,15 @@ def as_int(value) -> int | None:
         return None
 
 
+def as_float(value) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def is_active_tick(rec: dict) -> bool:
     mode = str(rec.get("mode") or "")
     state = str(rec.get("state") or "")
@@ -85,6 +94,144 @@ def _strict_required_files_ok(present_filenames: set[str]) -> bool:
     if "decision.jsonl" in present_filenames:
         return True
     return any(name.startswith("mm_") and name.endswith(".jsonl") for name in present_filenames)
+
+
+def _signed_qty(side_value: str | None, size_value) -> float | None:
+    side = str(side_value or "").lower()
+    size = as_float(size_value)
+    if size is None:
+        return None
+    if side == "buy":
+        return size
+    if side == "sell":
+        return -size
+    return None
+
+
+def _apply_fill_to_leg(state: dict, signed_qty: float, price: float) -> float:
+    pos = float(state["pos_qty"])
+    avg = float(state["avg_px"])
+    realized = 0.0
+
+    if pos == 0.0:
+        state["pos_qty"] = signed_qty
+        state["avg_px"] = price
+        return realized
+
+    if pos * signed_qty > 0:
+        new_pos = pos + signed_qty
+        state["avg_px"] = ((abs(pos) * avg) + (abs(signed_qty) * price)) / abs(new_pos)
+        state["pos_qty"] = new_pos
+        return realized
+
+    close_qty = min(abs(pos), abs(signed_qty))
+    if pos > 0:
+        realized += (price - avg) * close_qty
+    else:
+        realized += (avg - price) * close_qty
+
+    new_pos = pos + signed_qty
+    if new_pos == 0.0:
+        state["pos_qty"] = 0.0
+        state["avg_px"] = 0.0
+        return realized
+
+    if pos * new_pos < 0:
+        state["avg_px"] = price
+    state["pos_qty"] = new_pos
+    return realized
+
+
+def _compute_pnl(fill_events: list[tuple[int, dict]], tick_events_sorted: list[tuple[int, dict]]) -> dict:
+    leg_state = {
+        "SPOT": {"pos_qty": 0.0, "avg_px": 0.0, "realized_usdt": 0.0},
+        "USDT-FUTURES": {"pos_qty": 0.0, "avg_px": 0.0, "realized_usdt": 0.0},
+    }
+    fee_total = 0.0
+    processed = 0
+
+    for _, rec in sorted(fill_events, key=lambda x: x[0]):
+        inst_type = norm_inst_type(rec)
+        if inst_type not in leg_state:
+            continue
+        signed = _signed_qty(rec.get("side"), rec.get("size"))
+        px = as_float(rec.get("price"))
+        if signed is None or px is None or px <= 0:
+            continue
+        realized = _apply_fill_to_leg(leg_state[inst_type], signed, px)
+        leg_state[inst_type]["realized_usdt"] += realized
+        fee = as_float(rec.get("fee"))
+        if fee is not None:
+            fee_total += fee
+        processed += 1
+
+    last_mid_spot = None
+    last_mid_perp = None
+    for _, rec in tick_events_sorted:
+        mid_spot = as_float(rec.get("mid_spot"))
+        mid_perp = as_float(rec.get("mid_perp"))
+        if mid_spot is not None and mid_spot > 0:
+            last_mid_spot = mid_spot
+        if mid_perp is not None and mid_perp > 0:
+            last_mid_perp = mid_perp
+
+    unrealized_spot = 0.0
+    unrealized_perp = 0.0
+    mark_missing = []
+
+    spot_pos = float(leg_state["SPOT"]["pos_qty"])
+    spot_avg = float(leg_state["SPOT"]["avg_px"])
+    if spot_pos != 0:
+        if last_mid_spot is None:
+            mark_missing.append("SPOT")
+        else:
+            unrealized_spot = (last_mid_spot - spot_avg) * spot_pos
+
+    perp_pos = float(leg_state["USDT-FUTURES"]["pos_qty"])
+    perp_avg = float(leg_state["USDT-FUTURES"]["avg_px"])
+    if perp_pos != 0:
+        if last_mid_perp is None:
+            mark_missing.append("USDT-FUTURES")
+        else:
+            unrealized_perp = (last_mid_perp - perp_avg) * perp_pos
+
+    realized_total = float(leg_state["SPOT"]["realized_usdt"]) + float(
+        leg_state["USDT-FUTURES"]["realized_usdt"]
+    )
+    unrealized_total = unrealized_spot + unrealized_perp
+    gross = realized_total + unrealized_total
+    net = gross - fee_total
+
+    status = "PASS"
+    reason = "ok"
+    if processed == 0:
+        status = "SKIPPED"
+        reason = "no_fills"
+    elif mark_missing:
+        status = "WARN"
+        reason = "mark_missing"
+
+    return {
+        "status": status,
+        "reason": reason,
+        "fills_processed": processed,
+        "mark_missing": mark_missing,
+        "realized_usdt": round(realized_total, 10),
+        "unrealized_usdt": round(unrealized_total, 10),
+        "fee_usdt": round(fee_total, 10),
+        "gross_usdt": round(gross, 10),
+        "net_usdt": round(net, 10),
+        "spot": {
+            "pos_qty": round(spot_pos, 10),
+            "avg_px": round(spot_avg, 10),
+            "mark_px": None if last_mid_spot is None else round(last_mid_spot, 10),
+        },
+        "perp": {
+            "pos_qty": round(perp_pos, 10),
+            "avg_px": round(perp_avg, 10),
+            "mark_px": None if last_mid_perp is None else round(last_mid_perp, 10),
+        },
+    }
 
 
 def main() -> int:
@@ -102,6 +249,9 @@ def main() -> int:
         help="Comma-separated names or glob patterns (match basename or path).",
     )
     parser.add_argument("--require-ticket-events", action="store_true")
+    parser.add_argument("--require-fills", action="store_true")
+    parser.add_argument("--min-fills", type=int, default=1)
+    parser.add_argument("--require-pnl", action="store_true")
     args = parser.parse_args()
 
     paths = list(iter_paths(args.path))
@@ -115,6 +265,9 @@ def main() -> int:
     event_counts = defaultdict(int)
 
     perp_fills = 0
+    spot_fills = 0
+    total_fills = 0
+    simulated_fills = 0
     perp_quote_fills = 0
     hedge_orders = 0
     ticket_open = 0
@@ -130,6 +283,7 @@ def main() -> int:
     quote_fill_dupes = 0
     order_new_events: list[tuple[int, dict]] = []
     timed_events: list[tuple[int, dict]] = []
+    fill_events: list[tuple[int, dict]] = []
     halt_events: list[tuple[int, str | None]] = []
     ticket_ref: dict[str, str] = {}
     book_fallback_count = 0
@@ -197,17 +351,25 @@ def main() -> int:
                 book_store_cleared_failed += 1
 
         inst_type = norm_inst_type(rec)
-        if event == "fill" and inst_type == "USDT-FUTURES":
-            perp_fills += 1
-            fill_id = rec.get("fill_id") or rec.get("tradeId") or rec.get("trade_id")
-            if fill_id:
-                if fill_id in quote_fill_ids:
-                    quote_fill_dupes += 1
-                else:
-                    quote_fill_ids.add(fill_id)
-            client_oid = rec.get("client_oid") or rec.get("clientOid") or ""
-            if is_quote_client_oid(str(client_oid)):
-                perp_quote_fills += 1
+        if event == "fill":
+            total_fills += 1
+            if rec.get("simulated") is True:
+                simulated_fills += 1
+            if ts_ms is not None:
+                fill_events.append((ts_ms, rec))
+            if inst_type == "USDT-FUTURES":
+                perp_fills += 1
+                fill_id = rec.get("fill_id") or rec.get("tradeId") or rec.get("trade_id")
+                if fill_id:
+                    if fill_id in quote_fill_ids:
+                        quote_fill_dupes += 1
+                    else:
+                        quote_fill_ids.add(fill_id)
+                client_oid = rec.get("client_oid") or rec.get("clientOid") or ""
+                if is_quote_client_oid(str(client_oid)):
+                    perp_quote_fills += 1
+            elif inst_type == "SPOT":
+                spot_fills += 1
 
         if event == "order_new" and str(intent).upper() == "HEDGE":
             hedge_orders += 1
@@ -539,6 +701,13 @@ def main() -> int:
         if controlled_reconnect_timeout:
             errors.append(f"controlled_reconnect_timeout={controlled_reconnect_timeout}")
 
+    if args.require_fills and total_fills < args.min_fills:
+        errors.append(f"min_fills_not_met={total_fills}/{args.min_fills}")
+
+    pnl_summary = _compute_pnl(fill_events, tick_events_sorted)
+    if args.require_pnl and pnl_summary["status"] != "PASS":
+        errors.append(f"pnl_not_available={pnl_summary['reason']}")
+
     print("warn_missing_lines:", warn_missing)
     print("missing_key_counts:", dict(missing_key))
     print("bad_json_lines:", bad_json)
@@ -548,7 +717,10 @@ def main() -> int:
     print("required_files:", required_files)
     print("missing_required_files:", missing_required)
     print("event_counts:", dict(event_counts))
+    print("total_fills:", total_fills)
+    print("spot_fills:", spot_fills)
     print("perp_fills:", perp_fills)
+    print("simulated_fills:", simulated_fills)
     print("perp_quote_fills:", perp_quote_fills)
     print("hedge_orders:", hedge_orders)
     print("ticket_open:", ticket_open)
@@ -576,6 +748,7 @@ def main() -> int:
     print("controlled_reconnect_timeout:", controlled_reconnect_timeout)
     print("ticket_events_present:", ticket_events_present)
     print("ticket_events_missing:", ticket_events_missing)
+    print("pnl_summary:", pnl_summary)
 
     perp_quote_check = {"status": "PASS", "reason": "ok"}
     if perp_quote_fills == 0:
@@ -590,6 +763,22 @@ def main() -> int:
         }
     else:
         perp_quote_check = {"status": "PASS", "reason": "count_match"}
+    min_fills_check = {"status": "PASS", "reason": "not_required"}
+    if args.require_fills:
+        if total_fills >= args.min_fills:
+            min_fills_check = {"status": "PASS", "reason": "min_fills_met"}
+        else:
+            min_fills_check = {
+                "status": "FAIL",
+                "reason": "min_fills_not_met",
+                "details": f"{total_fills}/{args.min_fills}",
+            }
+    pnl_check = {"status": pnl_summary["status"], "reason": pnl_summary["reason"]}
+    if args.require_pnl and pnl_summary["status"] != "PASS":
+        pnl_check = {
+            "status": "FAIL",
+            "reason": f"required_{pnl_summary['reason']}",
+        }
     gating_mode = (
         "strict"
         if (
@@ -597,6 +786,8 @@ def main() -> int:
             or bool(args.require_files)
             or args.halt_strict
             or args.book_filter_strict
+            or args.require_fills
+            or args.require_pnl
             or (args.controlled_grace_sec is not None and args.controlled_grace_sec > 0)
         )
         else "loose"
@@ -629,7 +820,10 @@ def main() -> int:
         "required_files": required_files,
         "missing_required_files": missing_required,
         "event_counts": dict(event_counts),
+        "total_fills": total_fills,
+        "spot_fills": spot_fills,
         "perp_fills": perp_fills,
+        "simulated_fills": simulated_fills,
         "perp_quote_fills": perp_quote_fills,
         "hedge_orders": hedge_orders,
         "ticket_open": ticket_open,
@@ -657,9 +851,12 @@ def main() -> int:
         "controlled_reconnect_timeout": controlled_reconnect_timeout,
         "ticket_events_present": ticket_events_present,
         "ticket_events_missing": ticket_events_missing,
+        "pnl": pnl_summary,
         "gating_mode": gating_mode,
         "checks": {
             "perp_quote_fill_mismatch": perp_quote_check,
+            "min_fills": min_fills_check,
+            "pnl": pnl_check,
         },
         "errors": errors,
         "ticket_errors_sample": ticket_errors[: args.max_details],

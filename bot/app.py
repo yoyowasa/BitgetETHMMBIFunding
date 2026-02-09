@@ -12,10 +12,12 @@ from dotenv import load_dotenv
 from .config import apply_env_overrides, load_apis, load_config
 from .exchange.bitget_gateway import BitgetGateway
 from .log.jsonl import JsonlLogger
+from .marketdata import book as book_md
 from .marketdata.funding import FundingCache
 from .oms.oms import OMS
 from .risk.guards import RiskGuards
 from .strategy.mm_funding import MMFundingStrategy
+from .types import ExecutionEvent, InstType, OrderIntent, Side
 
 
 def _parse_args() -> argparse.Namespace:
@@ -142,6 +144,121 @@ async def _cancel_all_on_startup(oms, logger) -> None:
         )
 
 
+def _sim_fill_sides(raw: str) -> list[Side]:
+    mode = (raw or "").strip().lower()
+    if mode == "buy":
+        return [Side.BUY]
+    if mode == "sell":
+        return [Side.SELL]
+    return [Side.BUY, Side.SELL]
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+async def _simulate_fills_loop(
+    *,
+    config,
+    gateway,
+    oms,
+    logger,
+    interval_sec: float,
+    fill_qty: float,
+    fill_side: str,
+    simulate_hedge_success: bool,
+) -> None:
+    if interval_sec <= 0:
+        interval_sec = 5.0
+    if fill_qty <= 0:
+        fill_qty = 0.01
+
+    seq = 0
+    while True:
+        await asyncio.sleep(interval_sec)
+        try:
+            channel = gateway.public_book_channel
+            perp_snapshot = book_md.snapshot_from_store(
+                gateway.store,
+                InstType.USDT_FUTURES,
+                config.symbols.perp.symbol,
+                levels=1,
+                channel=channel,
+            )
+            spot_snapshot = book_md.snapshot_from_store(
+                gateway.store,
+                InstType.SPOT,
+                config.symbols.spot.symbol,
+                levels=1,
+                channel=channel,
+            )
+            if perp_snapshot is None:
+                continue
+            perp_bbo = book_md.bbo_from_snapshot(perp_snapshot)
+            spot_bbo = book_md.bbo_from_snapshot(spot_snapshot) if spot_snapshot is not None else None
+
+            for side in _sim_fill_sides(fill_side):
+                seq += 1
+                ts = time.time()
+                perp_px = perp_bbo.ask if side == Side.BUY else perp_bbo.bid
+                intent_prefix = OrderIntent.QUOTE_BID.value if side == Side.BUY else OrderIntent.QUOTE_ASK.value
+                perp_fill = ExecutionEvent(
+                    inst_type=InstType.USDT_FUTURES,
+                    symbol=config.symbols.perp.symbol,
+                    order_id=f"SIM-PERP-ORDER-{seq}",
+                    client_oid=f"{intent_prefix}-SIM-{int(ts * 1000)}-{seq}",
+                    fill_id=f"SIM-PERP-FILL-{int(ts * 1000)}-{seq}",
+                    side=side,
+                    price=perp_px,
+                    size=fill_qty,
+                    fee=0.0,
+                    ts=ts,
+                )
+                await oms.ingest_fill(perp_fill, simulated=True, source="sim_fill")
+
+                if not simulate_hedge_success or spot_bbo is None:
+                    continue
+
+                hedge_side = Side.SELL if side == Side.BUY else Side.BUY
+                spot_px = spot_bbo.ask if hedge_side == Side.BUY else spot_bbo.bid
+                ticket_id = oms.latest_open_ticket_id() or f"HEDGE-SIM-{int(ts * 1000)}-{seq}"
+                spot_fill = ExecutionEvent(
+                    inst_type=InstType.SPOT,
+                    symbol=config.symbols.spot.symbol,
+                    order_id=f"SIM-SPOT-ORDER-{seq}",
+                    client_oid=ticket_id,
+                    fill_id=f"SIM-SPOT-FILL-{int(ts * 1000)}-{seq}",
+                    side=hedge_side,
+                    price=spot_px,
+                    size=fill_qty,
+                    fee=0.0,
+                    ts=ts + 0.001,
+                )
+                await oms.ingest_fill(spot_fill, simulated=True, source="sim_fill")
+
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.log(
+                {
+                    "event": "sim_fill_error",
+                    "intent": "SYSTEM",
+                    "source": "runtime",
+                    "mode": "RUN",
+                    "reason": "sim_fill_error",
+                    "leg": "sim",
+                    "data": {"error": repr(exc)},
+                    "simulated": True,
+                }
+            )
+
+
 async def _run() -> None:
     args = _parse_args()
     load_dotenv()
@@ -173,15 +290,19 @@ async def _run() -> None:
     loop_lag_task = asyncio.create_task(_loop_lag_probe(system_logger))
 
     apis = {}
-    private_enabled = True
-    try:
-        apis = load_apis(config.exchange)
-    except ValueError:
-        if config.strategy.dry_run:
-            private_enabled = False
-            system_logger.log({"event": "private_disabled", "reason": "missing_api_keys"})
-        else:
-            raise
+    force_private_off = os.environ.get("FORCE_PRIVATE_OFF", "0") == "1"
+    private_enabled = not force_private_off
+    if force_private_off:
+        system_logger.log({"event": "private_disabled", "reason": "force_private_off"})
+    else:
+        try:
+            apis = load_apis(config.exchange)
+        except ValueError:
+            if config.strategy.dry_run:
+                private_enabled = False
+                system_logger.log({"event": "private_disabled", "reason": "missing_api_keys"})
+            else:
+                raise
     _log_startup_flags(
         system_logger,
         stage="after_private_enabled",
@@ -274,6 +395,30 @@ async def _run() -> None:
             risk.halt("ws_disconnect")
             await oms.cancel_all(reason="ws_disconnect")
 
+        sim_fills_enabled = config.strategy.dry_run and (os.getenv("SIMULATE_FILLS", "0") == "1")
+        sim_fill_interval_sec = _env_float("SIM_FILL_INTERVAL_SEC", 5.0)
+        sim_fill_qty = _env_float("SIM_FILL_QTY", 0.01)
+        sim_fill_side = os.getenv("SIM_FILL_SIDE", "both")
+        simulate_hedge_success = os.getenv("SIMULATE_HEDGE_SUCCESS", "0") == "1"
+        if sim_fills_enabled:
+            system_logger.log(
+                {
+                    "event": "sim_fill_enabled",
+                    "intent": "SYSTEM",
+                    "source": "runtime",
+                    "mode": "RUN",
+                    "reason": "sim_fill_enabled",
+                    "leg": "sim",
+                    "data": {
+                        "interval_sec": sim_fill_interval_sec,
+                        "fill_qty": sim_fill_qty,
+                        "fill_side": sim_fill_side,
+                        "simulate_hedge_success": simulate_hedge_success,
+                    },
+                    "simulated": True,
+                }
+            )
+
         tasks = [
             asyncio.create_task(funding_cache.run()),
             asyncio.create_task(strategy.run()),
@@ -283,6 +428,21 @@ async def _run() -> None:
         if private_enabled:
             tasks.append(asyncio.create_task(oms.monitor_fills()))
             tasks.append(asyncio.create_task(oms.sync_positions()))
+        if sim_fills_enabled:
+            tasks.append(
+                asyncio.create_task(
+                    _simulate_fills_loop(
+                        config=config,
+                        gateway=gateway,
+                        oms=oms,
+                        logger=system_logger,
+                        interval_sec=sim_fill_interval_sec,
+                        fill_qty=sim_fill_qty,
+                        fill_side=sim_fill_side,
+                        simulate_hedge_success=simulate_hedge_success,
+                    )
+                )
+            )
         tasks.extend(ws_tasks)
         tasks.append(constraints_task)
 
