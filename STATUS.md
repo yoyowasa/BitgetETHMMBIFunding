@@ -168,6 +168,20 @@
 ### 未解決
 - hedge ラダーは簡易版で、実 impact 見積りは未実装。
 
+## 2026-04-24 audit 修正履歴
+
+### 観測事実
+- `tools/audit.ps1` は `.venv\Scripts\python.exe` 固定で、GitHub Actions の `setup-python` 環境では失敗した。
+- `.github\workflows\audit.yml` は `python` を導入済みだった。
+
+### 実装
+- `tools/audit.ps1` に Python 解決ロジックを追加。
+- 優先順を `venv` → `python` → `py -3` に変更。
+- audit 開始時に使用 Python と source を出力するようにした。
+
+### 未解決
+- CI 上での再実行結果は未確認。
+
 ---
 
 ## 直近コミット（参考）

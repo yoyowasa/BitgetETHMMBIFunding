@@ -49,6 +49,38 @@ function Convert-ToArgArray {
     return $tokens
 }
 
+function Resolve-PythonCommand {
+    param([string]$VenvPython)
+
+    if (Test-Path $VenvPython) {
+        return @{
+            executable = $VenvPython
+            args = @()
+            source = "venv"
+        }
+    }
+
+    $pythonCmd = Get-Command python -ErrorAction SilentlyContinue
+    if ($null -ne $pythonCmd) {
+        return @{
+            executable = $pythonCmd.Source
+            args = @()
+            source = "system-python"
+        }
+    }
+
+    $pyCmd = Get-Command py -ErrorAction SilentlyContinue
+    if ($null -ne $pyCmd) {
+        return @{
+            executable = $pyCmd.Source
+            args = @("-3")
+            source = "py-launcher"
+        }
+    }
+
+    return $null
+}
+
 if (Test-Path $configPath) {
     try {
         $jsonCfg = Get-Content -Path $configPath -Raw | ConvertFrom-Json
@@ -82,10 +114,12 @@ Write-Host "[audit] REPO_ID=$repoId"
 Write-Host "[audit] GIT_ROOT=$gitRoot"
 Write-Host "[audit] ORIGIN=$origin"
 
-if (-not (Test-Path $pythonExe)) {
-    Write-Error "VENV_PYTHON_NOT_FOUND path=$pythonExe"
+$pythonCmd = Resolve-PythonCommand -VenvPython $pythonExe
+if ($null -eq $pythonCmd) {
+    Write-Error "PYTHON_NOT_FOUND venv_path=$pythonExe"
     exit 2
 }
+Write-Host "[audit] PYTHON=$($pythonCmd.executable) source=$($pythonCmd.source)"
 
 $ruffRequired = [bool]$cfg["ruff_required"]
 $pytestRequired = [bool]$cfg["pytest_required"]
@@ -105,7 +139,7 @@ try {
     }
     else {
         Write-Host "[audit] ruff check ."
-        & $pythonExe -m ruff check .
+        & $pythonCmd.executable @($pythonCmd.args + @("-m", "ruff", "check", "."))
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     }
 
@@ -117,7 +151,7 @@ try {
     }
     else {
         Write-Host "[audit] pytest $($pytestArgs -join ' ')"
-        & $pythonExe -m pytest $pytestArgs
+        & $pythonCmd.executable @($pythonCmd.args + @("-m", "pytest") + $pytestArgs)
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     }
 
@@ -126,7 +160,7 @@ try {
     }
     else {
         Write-Host "[audit] mypy . (StrictMypy=$StrictMypy required=$mypyRequired)"
-        & $pythonExe -m mypy .
+        & $pythonCmd.executable @($pythonCmd.args + @("-m", "mypy", "."))
         $mypyExit = $LASTEXITCODE
         if ($mypyExit -ne 0) {
             if ($StrictMypy -or $mypyRequired) {
