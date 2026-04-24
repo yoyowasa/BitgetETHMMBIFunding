@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 from .config import apply_env_overrides, load_apis, load_config
 from .exchange.bitget_gateway import BitgetGateway
 from .log.jsonl import JsonlLogger
+from .log.pnl_logger import PnLAggregator
 from .marketdata import book as book_md
 from .marketdata.funding import FundingCache
 from .oms.oms import OMS
@@ -259,6 +260,30 @@ async def _simulate_fills_loop(
             )
 
 
+async def _pnl_flush_loop(
+    *,
+    pnl_aggregator: PnLAggregator,
+    oms: OMS,
+    funding_cache: FundingCache,
+    interval_sec: float = 60.0,
+) -> None:
+    while True:
+        await asyncio.sleep(interval_sec)
+        funding = funding_cache.last
+        if funding is not None:
+            perp_mid = oms._perp_mid()  # type: ignore[attr-defined]
+            if perp_mid is not None:
+                pnl_aggregator.record_funding(
+                    funding.funding_rate * oms.positions.perp_pos * perp_mid
+                )
+            spot_mid = oms._spot_mid()  # type: ignore[attr-defined]
+            if spot_mid is not None and perp_mid is not None:
+                basis = (perp_mid - spot_mid) * oms.positions.perp_pos
+                pnl_aggregator.record_basis(basis)
+        pnl_aggregator.record_quote_metrics(oms.drain_quote_metrics())
+        pnl_aggregator.flush()
+
+
 async def _run() -> None:
     args = _parse_args()
     load_dotenv()
@@ -276,6 +301,7 @@ async def _run() -> None:
     orders_logger = JsonlLogger(os.path.join(log_dir, "orders.jsonl"))
     fills_logger = JsonlLogger(os.path.join(log_dir, "fills.jsonl"))
     decision_logger = JsonlLogger(os.path.join(log_dir, "decision.jsonl"))
+    pnl_logger = JsonlLogger(os.path.join(log_dir, "pnl.jsonl"))
     _log_startup_flags(system_logger, stage="run_enter")
     env_dry_run = os.environ.get("DRY_RUN")  # 役割: envのDRY_RUNを最優先にし、config由来のdry_runを上書きする
     if env_dry_run in ("0", "1"):  # 役割: 想定値(0/1)のときだけ強制上書きする
@@ -322,7 +348,8 @@ async def _run() -> None:
         )
         funding_cache = FundingCache(gateway, logger=system_logger)
         risk = RiskGuards(config.risk)
-        oms = OMS(gateway, config, risk, orders_logger, fills_logger)
+        pnl_aggregator = PnLAggregator(pnl_logger)
+        oms = OMS(gateway, config, risk, orders_logger, fills_logger, pnl_aggregator)
         if private_enabled:  # 役割: dry_runでも残骸注文は事故源なので、privateが有効なら起動時に必ず全キャンセルする
             await _cancel_all_on_startup(oms, system_logger)
             await asyncio.sleep(5)  # 役割: WS/制約/残高の初期化を待つウォームアップ時間を確保し、起動直後の誤発注を防ぐ
@@ -422,6 +449,13 @@ async def _run() -> None:
         tasks = [
             asyncio.create_task(funding_cache.run()),
             asyncio.create_task(strategy.run()),
+            asyncio.create_task(
+                _pnl_flush_loop(
+                    pnl_aggregator=pnl_aggregator,
+                    oms=oms,
+                    funding_cache=funding_cache,
+                )
+            ),
             asyncio.create_task(monitor_disconnect()),
             loop_lag_task,
         ]

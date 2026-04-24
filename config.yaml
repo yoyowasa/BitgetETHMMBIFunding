@@ -38,7 +38,17 @@ strategy:
   obi_levels: 5
   alpha_obi_bps: 1.0
   gamma_inventory_bps: 2.0
-  base_half_spread_bps: 2.0
+  base_half_spread_bps: 8.0
+  fade_vol_bps: 3.0
+  aggressive_trade_proximity_bps: 1.0
+  tfi_fade_threshold: 0.6
+  reprice_threshold_bps: 1.0
+  adverse_fill_horizon_sec: 2.0
+  k_tfi_bps: 1.0
+  funding_skew_bps_per_rate: 1000.0
+  target_inventory_max_ratio: 1.0
+  funding_window_sec: 300.0
+  min_half_spread_bps: 8.0
   quote_refresh_ms: 250
   dry_run: true
 
@@ -51,6 +61,7 @@ hedge:
   unwind_enable: true
 
 cost:
-  fee_maker_perp_bps: 1.0
-  fee_taker_spot_bps: 6.0
-  slippage_bps: 3.0
+  # VIP0 前提。実 tier は /api/v2/user/fee で確認すること
+  fee_maker_perp_bps: 2.0
+  fee_taker_spot_bps: 10.0
+  slippage_bps: 2.0

@@ -10,6 +10,7 @@ from ..config import AppConfig, HedgeConfig
 from ..exchange.bitget_gateway import BitgetGateway
 from ..exchange.constraints import InstrumentConstraints
 from ..log.jsonl import JsonlLogger
+from ..log.pnl_logger import PnLAggregator, QuoteMetrics
 from ..marketdata import book as book_md
 from ..risk.guards import RiskGuards
 from ..types import ExecutionEvent, Force, InstType, OrderIntent, OrderRequest, OrderType, Side
@@ -38,6 +39,8 @@ class HedgeTicket:
     tries: int
     status: str
     reason: str
+    perp_fill_ts: float
+    perp_fill_price: float
 
     @property
     def remain(self) -> float:
@@ -80,6 +83,7 @@ class OMS:
         risk: RiskGuards,
         orders_logger: JsonlLogger,
         fills_logger: JsonlLogger,
+        pnl_aggregator: PnLAggregator | None = None,
     ):
         self._gateway = gateway
         self._config = config
@@ -87,6 +91,7 @@ class OMS:
         self._risk = risk
         self._orders_logger = orders_logger
         self._fills_logger = fills_logger
+        self._pnl = pnl_aggregator
         self._positions = PositionTracker()
         self._seen_fills = LRUSet()
         self._active_quotes: dict[OrderIntent, Optional[ActiveOrder]] = {
@@ -97,9 +102,13 @@ class OMS:
         self._spot_client_ticket: dict[str, str] = {}
         self._spot_order_ticket: dict[str, str] = {}
         self._hedge_tickets: dict[str, HedgeTicket] = {}
+        self._symbol_locks: dict[str, asyncio.Lock] = {}
         self._unhedged_qty = 0.0
         self._unhedged_since: Optional[float] = None
         self._dry_run = config.strategy.dry_run
+        self._quote_orders = 0
+        self._quote_fills = 0
+        self._adverse_fills = 0
 
     @property
     def positions(self) -> PositionTracker:
@@ -125,6 +134,17 @@ class OMS:
             if latest is None or ticket.created_ts > latest.created_ts:
                 latest = ticket
         return None if latest is None else latest.ticket_id
+
+    def drain_quote_metrics(self) -> QuoteMetrics:
+        metrics = QuoteMetrics(
+            quote_orders=self._quote_orders,
+            quote_fills=self._quote_fills,
+            adverse_fills=self._adverse_fills,
+        )
+        self._quote_orders = 0
+        self._quote_fills = 0
+        self._adverse_fills = 0
+        return metrics
 
     async def ingest_fill(
         self,
@@ -155,44 +175,47 @@ class OMS:
                 }
             )
             return
-        await self._upsert_quote(
-            OrderIntent.QUOTE_BID, Side.BUY, bid_px, bid_size, cycle_id, reason
-        )
-        await self._upsert_quote(
-            OrderIntent.QUOTE_ASK, Side.SELL, ask_px, ask_size, cycle_id, reason
-        )
+        async with self._get_symbol_lock(self._config.symbols.perp.symbol):
+            await self._upsert_quote(
+                OrderIntent.QUOTE_BID, Side.BUY, bid_px, bid_size, cycle_id, reason
+            )
+            await self._upsert_quote(
+                OrderIntent.QUOTE_ASK, Side.SELL, ask_px, ask_size, cycle_id, reason
+            )
 
     async def cancel_all(self, reason: str) -> None:
-        for intent, order in list(self._active_quotes.items()):
-            if order is None:
-                continue
-            await self._cancel_order(
-                InstType.USDT_FUTURES, order, reason=reason, state="cancel"
-            )
-            self._active_quotes[intent] = None
+        async with self._get_symbol_lock(self._config.symbols.perp.symbol):
+            for intent, order in list(self._active_quotes.items()):
+                if order is None:
+                    continue
+                await self._cancel_order(
+                    InstType.USDT_FUTURES, order, reason=reason, state="cancel"
+                )
+                self._active_quotes[intent] = None
 
     async def flatten(self, spot_bbo: Optional[book_md.BBO], cycle_id: int, reason: str) -> None:
-        await self.cancel_all(reason=reason)
-        if not self._gateway.constraints.ready():
-            return
-        if self._positions.perp_pos != 0:
-            side = Side.BUY if self._positions.perp_pos < 0 else Side.SELL
-            size = abs(self._positions.perp_pos)
-            await self._submit_order(
-                OrderRequest(
-                    inst_type=InstType.USDT_FUTURES,
-                    symbol=self._config.symbols.perp.symbol,
-                    side=side,
-                    order_type=OrderType.MARKET,
-                    size=size,
-                    force=Force.IOC,
-                    client_oid=self._new_client_oid(OrderIntent.FLATTEN, cycle_id),
-                    intent=OrderIntent.FLATTEN,
-                    cycle_id=cycle_id,
-                    reduce_only=True,
-                ),
-                reason=reason,
-            )
+        async with self._get_symbol_lock(self._config.symbols.perp.symbol):
+            await self._cancel_all_quotes_unlocked(reason=reason)
+            if not self._gateway.constraints.ready():
+                return
+            if self._positions.perp_pos != 0:
+                side = Side.BUY if self._positions.perp_pos < 0 else Side.SELL
+                size = abs(self._positions.perp_pos)
+                await self._submit_order(
+                    OrderRequest(
+                        inst_type=InstType.USDT_FUTURES,
+                        symbol=self._config.symbols.perp.symbol,
+                        side=side,
+                        order_type=OrderType.MARKET,
+                        size=size,
+                        force=Force.IOC,
+                        client_oid=self._new_client_oid(OrderIntent.FLATTEN, cycle_id),
+                        intent=OrderIntent.FLATTEN,
+                        cycle_id=cycle_id,
+                        reduce_only=True,
+                    ),
+                    reason=reason,
+                )
         if spot_bbo and self._positions.spot_pos != 0:
             side = Side.SELL if self._positions.spot_pos > 0 else Side.BUY
             size = abs(self._positions.spot_pos)
@@ -356,6 +379,7 @@ class OMS:
                 "fee": event.fee,
                 "intent": None if intent is None else intent.value,
                 "ticket_id": ticket_id,
+                "hedge_latency_ms": self._hedge_latency_ms(event, ticket_id),
                 "source": source,
                 "simulated": simulated,
             }
@@ -367,7 +391,15 @@ class OMS:
         if intent in (OrderIntent.FLATTEN, OrderIntent.UNWIND):
             return
         if event.inst_type == InstType.USDT_FUTURES:
+            if intent in (OrderIntent.QUOTE_BID, OrderIntent.QUOTE_ASK):
+                self._quote_fills += 1
+                if self._is_adverse_quote_fill(event):
+                    self._adverse_fills += 1
+            if self._pnl is not None:
+                self._pnl.record_fees(abs(event.fee))
             await self._hedge_perp_fill(event)
+        elif event.inst_type == InstType.SPOT and self._pnl is not None:
+            self._pnl.record_fees(abs(event.fee))
 
     def _open_hedge_ticket(self, event: ExecutionEvent, hedge_side: Side, reason: str) -> HedgeTicket:
         now = time.time()
@@ -383,6 +415,8 @@ class OMS:
             tries=0,
             status="OPEN",
             reason=reason,
+            perp_fill_ts=event.ts,
+            perp_fill_price=event.price,
         )
         self._hedge_tickets[ticket_id] = ticket
         self._orders_logger.log(
@@ -413,11 +447,7 @@ class OMS:
     ) -> None:
         if ticket.remain <= 0:
             return
-        price = spot_bbo.ask if ticket.side == Side.BUY else spot_bbo.bid
-        if ticket.side == Side.BUY:
-            price *= 1 + (slip_bps / 10000.0)
-        else:
-            price *= 1 - (slip_bps / 10000.0)
+        order_type, force, price = self._spot_hedge_order_plan(ticket, spot_bbo, slip_bps)
         client_oid = (
             ticket.ticket_id
             if use_ticket_client
@@ -428,9 +458,9 @@ class OMS:
             inst_type=InstType.SPOT,
             symbol=self._config.symbols.spot.symbol,
             side=ticket.side,
-            order_type=OrderType.LIMIT,
+            order_type=order_type,
             size=ticket.remain,
-            force=Force.IOC,
+            force=force,
             client_oid=client_oid,
             intent=OrderIntent.HEDGE,
             cycle_id=int(time.time() * 1000),
@@ -540,9 +570,20 @@ class OMS:
         ticket = self._hedge_tickets.get(ticket_id)
         if ticket is None:
             return
+        if self._pnl is not None:
+            latency_ms = max(0.0, (event.ts - ticket.perp_fill_ts) * 1000.0)
+            self._pnl.record_hedge_latency(latency_ms)
+            spot_mid = self._spot_mid()
+            if spot_mid is not None:
+                slip = abs(event.price - spot_mid) * event.size
+                self._pnl.record_hedge_slip(slip)
         ticket.filled_qty += event.size
         if ticket.remain <= 1e-9:
             ticket.status = "DONE"
+            if self._pnl is not None:
+                perp_signed = ticket.want_qty if ticket.side == Side.SELL else -ticket.want_qty
+                spread_pnl = (event.price - ticket.perp_fill_price) * perp_signed
+                self._pnl.record_gross_spread(spread_pnl)
             self._orders_logger.log(
                 {
                     "event": "state",
@@ -581,6 +622,26 @@ class OMS:
         self._unhedged_qty += delta
         if self._unhedged_since is None:
             self._unhedged_since = time.time()
+        if self._pnl is not None:
+            spot_mid = self._spot_mid()
+            if spot_mid is not None:
+                self._pnl.update_max_unhedged_notional(abs(self._unhedged_qty) * spot_mid)
+
+    def _get_symbol_lock(self, symbol: str) -> asyncio.Lock:
+        lock = self._symbol_locks.get(symbol)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._symbol_locks[symbol] = lock
+        return lock
+
+    async def _cancel_all_quotes_unlocked(self, reason: str) -> None:
+        for intent, order in list(self._active_quotes.items()):
+            if order is None:
+                continue
+            await self._cancel_order(
+                InstType.USDT_FUTURES, order, reason=reason, state="cancel"
+            )
+            self._active_quotes[intent] = None
 
     async def _upsert_quote(
         self,
@@ -615,10 +676,12 @@ class OMS:
         if not constraints.validate(price, size):
             return
 
-        if existing and not self._needs_replace(existing, price, size, constraints):
+        if existing and not self._should_replace(existing, price, size, constraints):
             return
 
         if existing:
+            if self._pnl is not None:
+                self._pnl.record_quote_replace()
             await self._cancel_order(
                 InstType.USDT_FUTURES, existing, reason=reason, state="replace"
             )
@@ -637,6 +700,7 @@ class OMS:
         )
         order_id = await self._submit_order(req, reason=reason)
         if order_id:
+            self._quote_orders += 1
             self._active_quotes[intent] = ActiveOrder(
                 order_id=order_id,
                 client_oid=req.client_oid,
@@ -743,6 +807,8 @@ class OMS:
             ok = str(resp_code) == "00000"
             streak = self._risk.record_order_result(ok)
             if not ok:
+                if self._pnl is not None:
+                    self._pnl.record_reject_streak(streak)
                 self._orders_logger.log(
                     {
                         "event": "risk",
@@ -803,12 +869,93 @@ class OMS:
         price: float,
         size: float,
         constraints: InstrumentConstraints,
+        threshold_bps: float = 0.0,
     ) -> bool:
         if abs(size - existing.size) > constraints.qty_step / 2:
             return True
+        if existing.price <= 0:
+            return True
+        delta_bps = abs(price - existing.price) / existing.price * 10000.0
+        if delta_bps < threshold_bps:
+            return False
         if abs(price - existing.price) >= constraints.tick_size:
             return True
         return False
+
+    def _should_replace(
+        self,
+        existing: ActiveOrder,
+        price: float,
+        size: float,
+        constraints: InstrumentConstraints,
+    ) -> bool:
+        return self._needs_replace(
+            existing,
+            price,
+            size,
+            constraints,
+            threshold_bps=self._config.strategy.reprice_threshold_bps,
+        )
+
+    def _spot_hedge_order_plan(
+        self,
+        ticket: HedgeTicket,
+        spot_bbo: book_md.BBO,
+        slip_bps: float,
+    ) -> tuple[OrderType, Force, float]:
+        price = spot_bbo.ask if ticket.side == Side.BUY else spot_bbo.bid
+        unhedged_sec = max(0.0, time.time() - ticket.created_ts)
+        if unhedged_sec < (self._config.risk.max_unhedged_sec * 0.5):
+            return OrderType.LIMIT, Force.POST_ONLY, price
+        if ticket.side == Side.BUY:
+            price *= 1 + (slip_bps / 10000.0)
+        else:
+            price *= 1 - (slip_bps / 10000.0)
+        return OrderType.LIMIT, Force.IOC, price
+
+    def _hedge_latency_ms(
+        self, event: ExecutionEvent, ticket_id: Optional[str]
+    ) -> float | None:
+        if ticket_id is None:
+            return None
+        ticket = self._hedge_tickets.get(ticket_id)
+        if ticket is None:
+            return None
+        return max(0.0, (event.ts - ticket.perp_fill_ts) * 1000.0)
+
+    def _spot_mid(self) -> float | None:
+        channel = getattr(self._gateway, "public_book_channel", None)
+        snapshot = book_md.snapshot_from_store(
+            self._gateway.store,
+            InstType.SPOT,
+            self._config.symbols.spot.symbol,
+            levels=1,
+            channel=channel,
+        )
+        if snapshot is None:
+            return None
+        return book_md.calc_mid(book_md.bbo_from_snapshot(snapshot))
+
+    def _perp_mid(self) -> float | None:
+        channel = getattr(self._gateway, "public_book_channel", None)
+        snapshot = book_md.snapshot_from_store(
+            self._gateway.store,
+            InstType.USDT_FUTURES,
+            self._config.symbols.perp.symbol,
+            levels=1,
+            channel=channel,
+        )
+        if snapshot is None:
+            return None
+        return book_md.calc_mid(book_md.bbo_from_snapshot(snapshot))
+
+    def _is_adverse_quote_fill(self, event: ExecutionEvent) -> bool:
+        perp_mid = self._perp_mid()
+        if perp_mid is None:
+            return False
+        if event.side == Side.BUY:
+            return perp_mid < event.price
+        return perp_mid > event.price
 
     @staticmethod
     def _intent_from_client_oid(client_oid: str) -> Optional[OrderIntent]:

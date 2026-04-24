@@ -58,6 +58,16 @@ class StrategyConfig:
     gamma_inventory_bps: float
     base_half_spread_bps: float
     quote_refresh_ms: int
+    fade_vol_bps: float = 3.0
+    aggressive_trade_proximity_bps: float = 1.0
+    tfi_fade_threshold: float = 0.6
+    reprice_threshold_bps: float = 1.0
+    adverse_fill_horizon_sec: float = 2.0
+    k_tfi_bps: float = 1.0
+    funding_skew_bps_per_rate: float = 1000.0
+    target_inventory_max_ratio: float = 1.0
+    funding_window_sec: float = 300.0
+    min_half_spread_bps: float = 8.0
     dry_run: bool = False
 
 

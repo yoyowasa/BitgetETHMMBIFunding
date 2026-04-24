@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 import json
 import time
 from typing import Any, Optional
@@ -10,6 +11,7 @@ import pybotters
 from ..config import AppConfig
 from ..log.jsonl import JsonlLogger
 from ..marketdata import book as book_md
+from ..marketdata.tfi import TFIAccumulator
 from ..types import InstType, OrderRequest
 from .constraints import ConstraintsRegistry, InstrumentConstraints
 
@@ -37,6 +39,9 @@ class BitgetGateway:
         self._controlled_reconnect_until_ms = 0
         self._controlled_reconnect_reason: str | None = None
         self._book_channel_filter_supported: bool | None = None
+        self._tfi = TFIAccumulator(window_sec=5.0)
+        self._last_public_trade: dict[str, Any] | None = None
+        self._perp_mid_history: deque[tuple[float, float]] = deque()
 
     async def start_public_ws(self) -> None:
         spot = self.config.symbols.spot
@@ -68,9 +73,22 @@ class BitgetGateway:
             inst_id=perp_inst_id,
             raw_symbol=perp.symbol,
         )
+        self._log(
+            "trade_ws_subscribe",
+            intent="SYSTEM",
+            source="ws_public",
+            mode="INIT",
+            reason="trade_ws_subscribe",
+            leg="trade",
+            inst_type=perp.instType,
+            channel="trade",
+            inst_id=perp_inst_id,
+            raw_symbol=perp.symbol,
+        )
         args = [
             {"instType": spot.instType, "channel": channel, "instId": spot_inst_id},
             {"instType": perp.instType, "channel": channel, "instId": perp_inst_id},
+            {"instType": perp.instType, "channel": "trade", "instId": perp_inst_id},
         ]
         payload = {"op": "subscribe", "args": args}
         self._ws_public = await self._client.ws_connect(
@@ -117,6 +135,8 @@ class BitgetGateway:
             inst_id = arg.get("instId", "?")
             book_md._latch_book_ready(inst_type, channel, inst_id)
             book_md._stat_book_msg(self._logger, msg)
+            self._record_perp_mid(msg)
+        self._record_public_trade(msg)
 
     async def run_public_ws(self, reconnect_delay: float = 3.0) -> None:
         book_timeout_sec = self.config.risk.book_boot_timeout_sec
@@ -355,6 +375,29 @@ class BitgetGateway:
     def book_ready(self) -> bool:
         return self._book_ready_event.is_set()
 
+    @property
+    def tfi(self) -> float:
+        return self._tfi.get_tfi()
+
+    @property
+    def last_public_trade(self) -> dict[str, Any] | None:
+        return self._last_public_trade
+
+    def mid_100ms_ago(self, now: float | None = None) -> float | None:
+        if not self._perp_mid_history:
+            return None
+        now_ts = time.time() if now is None else now
+        target_ts = now_ts - 0.1
+        candidate: float | None = None
+        while len(self._perp_mid_history) > 1 and self._perp_mid_history[0][0] < now_ts - 2.0:
+            self._perp_mid_history.popleft()
+        for ts, mid in self._perp_mid_history:
+            if ts <= target_ts:
+                candidate = mid
+            else:
+                break
+        return candidate
+
     def note_book_channel_filter_unavailable(
         self, inst_type: InstType, symbol: str, channel: str
     ) -> None:
@@ -496,6 +539,54 @@ class BitgetGateway:
         asks = book.get("asks") or []
         return bool(bids) and bool(asks)
 
+    def _record_public_trade(self, msg: dict) -> None:
+        arg = msg.get("arg")
+        if not isinstance(arg, dict):
+            return
+        if arg.get("channel") != "trade":
+            return
+        if arg.get("instType") != self.config.symbols.perp.instType:
+            return
+        if arg.get("instId") != book_md._ws_inst_id(self.config.symbols.perp.symbol):
+            return
+        rows = msg.get("data")
+        if not isinstance(rows, list):
+            return
+        for row in rows:
+            trade = _parse_public_trade_row(row)
+            if trade is None:
+                continue
+            self._tfi.add_trade(trade["ts"], trade["size"], trade["side"])
+            trade["tfi"] = self._tfi.value_at(trade["ts"])
+            self._last_public_trade = trade
+
+    def _record_perp_mid(self, msg: dict) -> None:
+        arg = msg.get("arg")
+        if not isinstance(arg, dict):
+            return
+        if arg.get("instType") != self.config.symbols.perp.instType:
+            return
+        if arg.get("instId") != book_md._ws_inst_id(self.config.symbols.perp.symbol):
+            return
+        data = msg.get("data")
+        if not isinstance(data, list) or not data:
+            return
+        head = data[0]
+        if not isinstance(head, dict):
+            return
+        bids = head.get("bids") or []
+        asks = head.get("asks") or []
+        if not bids or not asks:
+            return
+        bid_px = _level_px(bids[0])
+        ask_px = _level_px(asks[0])
+        if bid_px is None or ask_px is None:
+            return
+        ts = _safe_ts(head.get("ts") or head.get("timestamp") or head.get("time")) or time.time()
+        self._perp_mid_history.append((ts, (bid_px + ask_px) / 2.0))
+        while len(self._perp_mid_history) > 1 and self._perp_mid_history[0][0] < ts - 2.0:
+            self._perp_mid_history.popleft()
+
 
 def _find_row(data: dict, key: str, value: str) -> Optional[dict]:
     for row in data.get("data", []) or []:
@@ -557,4 +648,63 @@ def _first_int(row: dict, keys: list[str]) -> Optional[int]:
                 return int(row[key])
             except (TypeError, ValueError):
                 continue
+    return None
+
+
+def _parse_public_trade_row(row: Any) -> dict[str, Any] | None:
+    if isinstance(row, list):
+        if len(row) < 4:
+            return None
+        ts = _safe_ts(row[0])
+        price = _safe_float(row[1])
+        size = _safe_float(row[2])
+        side = _normalize_trade_side(row[3])
+    elif isinstance(row, dict):
+        ts = _safe_ts(
+            row.get("ts") or row.get("time") or row.get("timestamp") or row.get("tradeTime")
+        )
+        price = _safe_float(row.get("price") or row.get("px"))
+        size = _safe_float(row.get("size") or row.get("sz") or row.get("qty"))
+        side = _normalize_trade_side(row.get("side") or row.get("direction"))
+    else:
+        return None
+    if ts is None or price is None or size is None or side is None:
+        return None
+    return {"ts": ts, "price": price, "size": size, "side": side}
+
+
+def _safe_float(value: Any) -> float | None:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_ts(value: Any) -> float | None:
+    ts = _safe_float(value)
+    if ts is None:
+        return None
+    if ts > 1e12:
+        return ts / 1000.0
+    return ts
+
+
+def _normalize_trade_side(value: Any) -> str | None:
+    if value is None:
+        return None
+    side = str(value).lower()
+    if side in ("buy", "b", "bid"):
+        return "buy"
+    if side in ("sell", "s", "ask"):
+        return "sell"
+    return None
+
+
+def _level_px(level: Any) -> float | None:
+    if isinstance(level, (list, tuple)) and level:
+        return _safe_float(level[0])
+    if isinstance(level, dict):
+        return _safe_float(level.get("price") or level.get("px"))
     return None

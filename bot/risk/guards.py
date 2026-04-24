@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from typing import Optional
 
 from ..config import RiskConfig
 
@@ -71,3 +72,37 @@ class RiskGuards:
         if unhedged_since is None:
             return False
         return (time.time() - unhedged_since) >= self._config.max_unhedged_sec
+
+
+def check_fast_mid_move(
+    mid_now: float,
+    mid_100ms_ago: Optional[float],
+    fade_vol_bps: float = 3.0,
+) -> bool:
+    if mid_100ms_ago is None or mid_100ms_ago <= 0:
+        return False
+    return abs(mid_now - mid_100ms_ago) / mid_100ms_ago * 10000.0 > fade_vol_bps
+
+
+def check_aggressive_trade(
+    trade_px: float,
+    trade_side: str,
+    bid_px: float,
+    ask_px: float,
+    proximity_bps: float = 1.0,
+) -> str | None:
+    if trade_side == "buy" and ask_px > 0:
+        if abs(trade_px - ask_px) / ask_px * 10000.0 < proximity_bps:
+            return "ask"
+    if trade_side == "sell" and bid_px > 0:
+        if abs(trade_px - bid_px) / bid_px * 10000.0 < proximity_bps:
+            return "bid"
+    return None
+
+
+def check_tfi_fade(tfi: float, threshold: float = 0.6) -> str | None:
+    if tfi > threshold:
+        return "ask"
+    if tfi < -threshold:
+        return "bid"
+    return None
