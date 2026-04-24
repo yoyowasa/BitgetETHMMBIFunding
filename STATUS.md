@@ -182,6 +182,18 @@
 ### 未解決
 - CI 上での再実行結果は未確認。
 
+## 2026-04-24 audit 依存修正履歴
+
+### 観測事実
+- `.github\workflows\audit.yml` は `requirements-dev.txt` のみをインストールしていた。
+- `requirements-dev.txt` に `PyYAML`、`pybotters` が無く、pytest collection が失敗した。
+
+### 実装
+- `requirements-dev.txt` の先頭に `-r requirements.txt` を追加。
+
+### 未解決
+- GitHub Actions 上での再実行結果は未確認。
+
 ---
 
 ## 直近コミット（参考）
