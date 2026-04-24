@@ -4,7 +4,7 @@ import asyncio
 
 from bot.config import AppConfig, CostConfig, ExchangeConfig, HedgeConfig, RiskConfig, StrategyConfig, SymbolConfig, SymbolsConfig
 from bot.oms.oms import OMS
-from bot.types import Force, InstType, OrderIntent, OrderRequest, OrderType, Side
+from bot.types import InstType, OrderIntent, OrderRequest
 
 
 class DummyLogger:
@@ -114,4 +114,3 @@ def test_symbol_lock_serializes_same_symbol() -> None:
         await asyncio.gather(task_flatten, task_quote)
 
     asyncio.run(runner())
-
