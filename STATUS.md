@@ -1503,3 +1503,57 @@ ec1b00a  chore: bulk update after lint & format
 ### 未確定点
 - 2回とも寿命改善は再現。ただし `order_cancel:quote` 増加の意味は未確定。
 - `DRY_RUN=0`、本番採用、spread恒久変更、guard閾値変更、実判定変更は未実施。
+
+---
+
+## 2026-04-27 cost 実測反映 / 統合 policy 本採用 / sim_fill 改修 / 移管準備
+
+### 観測事実
+- `scripts/check_vip_tier.py` 新規。`/api/v2/common/trade-rate` 実測:
+  - `spot makerFeeRate=10.0bps takerFeeRate=10.0bps` (VIP0)
+  - `mix(USDT-FUTURES) makerFeeRate=1.4bps takerFeeRate=4.2bps` (VIP3 相当)
+- 旧 `cost.fee_maker_perp_bps=2.0` は実態より 0.6bps 高かった。
+- 旧 sim_fill は perp BBO 価格で fill + fee=0 の簡易版で、post_only spread を取れない設計。
+
+### 実装
+- `config.yaml`:
+  - `cost.fee_maker_perp_bps: 1.4` (実測反映)
+  - `strategy.base_half_spread_bps: 18.0` / `min_half_spread_bps: 18.0`
+  - `quote_fade_policy: threshold_8bps`
+  - `cancel_aggressive_scope: active_quote_only`
+  - `cancel_aggressive_quality_filter: fresh_active_quote_proximity`
+  - `tfi_fade_policy: disabled`
+  - `min_funding_rate: 0.0` (positive funding なら常時 quote)
+- `bot/app.py`: `_simulate_fills_loop` を改修
+  - active quote 価格 (`oms.active_quote_snapshot()`) を fill 価格に使用
+  - perp maker fee / spot taker fee を qty*px*rate で計上
+  - active quote 無い時は fill skip
+- `scripts/plot_pnl.py` 新規 (matplotlib + plotly 両版)
+- `MIGRATION.md` 新規 (別 PC 移管 + 常駐稼働手順)
+- `scripts/start_bot.ps1` / `scripts/stop_bot.ps1` 新規 (auto-restart, graceful stop)
+- `.gitignore` に `reports/` 追加
+
+### DRY_RUN 検証 (sim_fill 改修後)
+| 設定 | net_pnl/30min | net/h 外挿 | 備考 |
+|---|---|---|---|
+| min_funding=0.00002, qty=0.01 | +18.01 USDT | 37.3 | Step 1 |
+| qty=0.01, interval=15s | +2.48/10min | - | 線形性確認 |
+| qty=0.01, interval=30/60s | 0 | - | funding_off 時間帯 |
+| min_funding=0.0, qty=0.01 | +24.61 USDT | 50.9 | funding_off=0 で 100% 稼働 |
+| min_funding=0.0, qty=0.02 | +50.49 USDT | 104.5 | lot 2x で PnL も 2x (線形) |
+
+### 推論
+- 旧「構造的赤字 EV/往復 -6〜-10bps」は cost 過大評価 + sim_fill 設計欠陥に起因。
+- 新 cost (24.8bps) + 18bps spread + 統合 policy で理論 EV +9.78bps、PnL ベースでも明確に黒字方向。
+- 実 fill 率は DRY_RUN では測定不能。係数 0.05〜0.1 想定で qty=0.01 年 22k〜45k USDT、qty=0.02 で 46k〜91k USDT 見積。
+- `min_funding_rate=0.0` で稼働率 97%、`enable_only_positive_funding=true` 維持で funding negative 時は自動停止 (safety 維持)。
+
+### 移管準備
+- `MIGRATION.md` に環境構築・DRY_RUN=0 移行・常駐稼働・監視・緊急停止手順を網羅。
+- 移管後 (別 PC) の DRY_RUN=0 微小ロット (target=100, max=200) → 段階拡大 を推奨。
+- `D` (quote_fill_rate / adverse_fill_rate ログ精査): 設計あり、`adverse_fill_horizon_sec` 未使用が改善余地。本番 (DRY_RUN=0) 後優先。
+
+### 未確定点
+- DRY_RUN=0 PnL 実測未実施 (資金確保待ち)。
+- 実 fill 率係数。adverse selection の実環境影響。
+- `quote_replace_count` が min_funding=0 設定で 11→34/分に増加した理由 (要分析候補)。

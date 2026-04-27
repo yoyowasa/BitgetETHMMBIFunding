@@ -1,4 +1,0 @@
-final_block_reason,count,ratio,mean_expected_edge_bps,median_expected_edge_bps,edge_pass_count,edge_pass_ratio,has_active_quote_count,quote_fade_count,cancel_aggressive_count,tfi_fade_count
-cancel_aggressive,2127,0.07452959108588247,6.146426892336744,6.020000000000003,2127,1.0,664,0,2127,0
-none,19857,0.6957847156522653,6.716756307599836,6.710000000000001,19857,1.0,12240,0,9903,5658
-quote_fade,6555,0.2296856932618522,6.5991075514871245,6.68,6555,1.0,3149,6555,0,0

@@ -1,2 +1,0 @@
-policy,quote_count,mean_lifetime_sec,median_lifetime_sec,quote_fade_end_count,tfi_fade_end_count,cancel_aggressive_end_count,order_cancel_quote_count,quote_fade_suppressed_count
-threshold_10bps,584,1.6091945972900652,0.9984602928161621,459,0,0,124,623

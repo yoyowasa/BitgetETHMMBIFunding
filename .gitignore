@@ -6,5 +6,6 @@ __pycache__/
 logs/
 runtime_logs/
 artifacts/
+reports/
 !tests/fixtures/logs/
 !tests/fixtures/logs/**

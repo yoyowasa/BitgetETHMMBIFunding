@@ -190,7 +190,25 @@ graceful stop（cancel_all + position flatten 試行）。
 Get-Content logs\pnl.jsonl -Tail 5 | ForEach-Object { ($_ | ConvertFrom-Json).net_pnl } | Measure-Object -Sum
 ```
 
-### 6.3 ログローテート
+### 6.3 PnL 可視化 (定期実行)
+
+`scripts/plot_pnl.py` で `reports/pnl_plots/*.png` を生成（matplotlib 必要）:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\plot_pnl.py
+```
+
+各 sim_fill 区間ごとに以下が出力される:
+- `runN_ivX_qtyY.png` - 累積 net_pnl / gross / fees + per-min bar
+- `comparison.png` - 全 run の mean/min と total 比較
+
+**運用時**: DRY_RUN=0 では sim_fill_enabled イベントが出ないため、`scripts/plot_pnl.py` を本番用に小改修要（pnl.jsonl 全期間 or 直近 N 時間で集計）。要修正項目として残す。
+
+**Task Scheduler 推奨設定**:
+- 日次 0:05 (UTC) に `plot_pnl.py` 実行 → 前日分グラフを `reports/pnl_plots/daily/<YYYYMMDD>.png` に出力
+- 週次でメール / Discord 通知（要追加実装）
+
+### 6.4 ログローテート
 `logs/` は無制限蓄積。週 1 回程度 `logs/archive/<YYYYMMDD>/` へ手動退避推奨。
 将来的には `tools/audit.ps1` などで自動化検討。
 
