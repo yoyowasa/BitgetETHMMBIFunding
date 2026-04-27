@@ -1,0 +1,2 @@
+policy,quote_count,mean_lifetime_sec,median_lifetime_sec,tfi_fade_end_count,quote_fade_end_count,cancel_aggressive_end_count,order_cancel_quote_count
+current,1080,0.286497410359206,0.2562985420227051,558,492,0,30

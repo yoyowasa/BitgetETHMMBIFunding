@@ -25,6 +25,9 @@ class ActiveOrder:
     side: Side
     intent: OrderIntent
     ts: float
+    symbol: str = ""
+    dry_run: bool = False
+    source: str = "live_order"
 
 
 @dataclass
@@ -125,6 +128,36 @@ class OMS:
     @property
     def unhedged_since(self) -> Optional[float]:
         return self._unhedged_since
+
+    def active_quote_snapshot(self, symbol: str | None = None) -> dict[str, object]:
+        if symbol is not None and symbol != self._config.symbols.perp.symbol:
+            bid = None
+            ask = None
+        else:
+            bid = self._active_quotes.get(OrderIntent.QUOTE_BID)
+            ask = self._active_quotes.get(OrderIntent.QUOTE_ASK)
+        sources = {order.source for order in (bid, ask) if order is not None}
+        source = "none"
+        if "live_order" in sources:
+            source = "live_order"
+        elif "dry_run_virtual" in sources:
+            source = "dry_run_virtual"
+        return {
+            "has_active_quote": bid is not None or ask is not None,
+            "active_bid": bid,
+            "active_ask": ask,
+            "active_bid_px": None if bid is None else bid.price,
+            "active_ask_px": None if ask is None else ask.price,
+            "active_bid_order_id": None if bid is None else bid.order_id,
+            "active_ask_order_id": None if ask is None else ask.order_id,
+            "active_bid_client_oid": None if bid is None else bid.client_oid,
+            "active_ask_client_oid": None if ask is None else ask.client_oid,
+            "active_bid_qty": None if bid is None else bid.size,
+            "active_ask_qty": None if ask is None else ask.size,
+            "active_bid_ts": None if bid is None else bid.ts,
+            "active_ask_ts": None if ask is None else ask.ts,
+            "source": source,
+        }
 
     def latest_open_ticket_id(self) -> Optional[str]:
         latest: Optional[HedgeTicket] = None
@@ -699,7 +732,10 @@ class OMS:
             price=price,
         )
         order_id = await self._submit_order(req, reason=reason)
-        if order_id:
+        if order_id or self._dry_run:
+            now = time.time()
+            if self._dry_run and order_id is None:
+                order_id = f"dryrun:{req.client_oid}"
             self._quote_orders += 1
             self._active_quotes[intent] = ActiveOrder(
                 order_id=order_id,
@@ -708,7 +744,10 @@ class OMS:
                 size=size,
                 side=side,
                 intent=intent,
-                ts=time.time(),
+                ts=now,
+                symbol=self._config.symbols.perp.symbol,
+                dry_run=self._dry_run,
+                source="dry_run_virtual" if self._dry_run else "live_order",
             )
 
     async def _submit_order(self, req: OrderRequest, reason: str) -> Optional[str]:

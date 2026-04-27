@@ -1,0 +1,6 @@
+candidate,total_rows,would_trigger_count,would_trigger_ratio,blocked_count,blocked_ratio,no_active_quote_count,stale_trade_count,far_from_active_quote_count,danger_direction_mismatch_count,median_trade_age_ms_triggered,p90_trade_age_ms_triggered,median_proximity_to_active_quote_bps_triggered,p90_proximity_to_active_quote_bps_triggered,median_proximity_to_best_bps_triggered,p90_proximity_to_best_bps_triggered
+A_current,6323,6323,1.0,0,0.0,0,0,0,0,2510.115385055542,10991.490983963013,35.74212277006541,37.53434869669929,0.0,0.21586429906781981
+B_require_active_quote,6323,664,0.1050134429859244,5659,0.8949865570140756,5659,0,0,0,1827.81183719635,8620.377182960514,35.74212277006541,37.53434869669929,0.0,0.17272425005273973
+C_require_active_quote_and_fresh_trade,6323,141,0.022299541356950815,6182,0.9777004586430492,5659,523,0,0,200.44326782226562,440.5841827392578,35.097389873865104,37.18632167468438,0.0,0.17272425005273973
+D_require_active_quote_fresh_and_active_proximity,6323,0,0.0,6323,1.0,5659,523,141,0,,,,,,
+E_require_active_quote_fresh_active_proximity_and_danger_match,6323,0,0.0,6323,1.0,5659,523,141,0,,,,,,

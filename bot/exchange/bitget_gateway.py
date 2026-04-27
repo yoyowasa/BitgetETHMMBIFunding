@@ -666,11 +666,15 @@ def _parse_public_trade_row(row: Any) -> dict[str, Any] | None:
         price = _safe_float(row.get("price") or row.get("px"))
         size = _safe_float(row.get("size") or row.get("sz") or row.get("qty"))
         side = _normalize_trade_side(row.get("side") or row.get("direction"))
+        trade_id = row.get("tradeId") or row.get("trade_id") or row.get("id")
     else:
         return None
     if ts is None or price is None or size is None or side is None:
         return None
-    return {"ts": ts, "price": price, "size": size, "side": side}
+    trade = {"ts": ts, "price": price, "size": size, "side": side}
+    if not isinstance(row, list) and trade_id is not None:
+        trade["trade_id"] = str(trade_id)
+    return trade
 
 
 def _safe_float(value: Any) -> float | None:

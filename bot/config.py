@@ -59,10 +59,19 @@ class StrategyConfig:
     base_half_spread_bps: float
     quote_refresh_ms: int
     fade_vol_bps: float = 3.0
+    quote_fade_policy: str = "current"
     aggressive_trade_proximity_bps: float = 1.0
+    cancel_aggressive_policy: str = "current"
+    cancel_aggressive_scope: str = "pre_quote_and_active"
+    cancel_aggressive_quality_filter: str = "off"
+    cancel_aggressive_max_trade_age_ms: float = 500.0
+    cancel_aggressive_active_proximity_bps: float = 1.0
+    one_sided_quote_policy: str = "current"
     tfi_fade_threshold: float = 0.6
+    tfi_fade_policy: str = "current"
     reprice_threshold_bps: float = 1.0
     adverse_fill_horizon_sec: float = 2.0
+    adverse_buffer_bps: float = 2.0
     k_tfi_bps: float = 1.0
     funding_skew_bps_per_rate: float = 1000.0
     target_inventory_max_ratio: float = 1.0

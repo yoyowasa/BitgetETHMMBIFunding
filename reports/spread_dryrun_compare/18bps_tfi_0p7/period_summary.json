@@ -1,0 +1,31 @@
+{
+  "start_ts": 1777023949.2383971,
+  "end_ts": 1777024562.1205263,
+  "duration_sec": 612.8821291923523,
+  "rows": 4721,
+  "order_new_quote": 20,
+  "quote_cycles": 20,
+  "cycle_side_counts": {
+    "1": 20
+  },
+  "single_side_cycles": 20,
+  "two_side_cycles": 0,
+  "risk_counts": {
+    "cancel_aggressive": 1794,
+    "quote_fade": 521,
+    "tfi_fade": 20,
+    "one_sided_quote_suppressed": 20
+  },
+  "one_sided_quote_suppressed": 20,
+  "suppressed_leg": {
+    "bid": 2,
+    "ask": 18
+  },
+  "quote_lifetime_count": 20,
+  "mean_lifetime_sec": 0.25464333295822145,
+  "median_lifetime_sec": 0.25385427474975586,
+  "cancel_aggressive_end": 6,
+  "quote_fade_end": 1,
+  "tfi_fade_end": 13,
+  "one_sided_suppressed_end": 0
+}

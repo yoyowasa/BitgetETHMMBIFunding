@@ -204,11 +204,27 @@ async def _simulate_fills_loop(
             perp_bbo = book_md.bbo_from_snapshot(perp_snapshot)
             spot_bbo = book_md.bbo_from_snapshot(spot_snapshot) if spot_snapshot is not None else None
 
+            snap = oms.active_quote_snapshot(config.symbols.perp.symbol)
+            has_active = bool(snap.get("has_active_quote"))
+            active_bid_px = snap.get("active_bid_px")
+            active_ask_px = snap.get("active_ask_px")
+
+            perp_maker_rate = float(config.cost.fee_maker_perp_bps) / 10000.0
+            spot_taker_rate = float(config.cost.fee_taker_spot_bps) / 10000.0
+
             for side in _sim_fill_sides(fill_side):
+                if not has_active:
+                    continue
+                if side == Side.BUY and active_bid_px is None:
+                    continue
+                if side == Side.SELL and active_ask_px is None:
+                    continue
+
                 seq += 1
                 ts = time.time()
-                perp_px = perp_bbo.ask if side == Side.BUY else perp_bbo.bid
+                perp_px = float(active_bid_px) if side == Side.BUY else float(active_ask_px)
                 intent_prefix = OrderIntent.QUOTE_BID.value if side == Side.BUY else OrderIntent.QUOTE_ASK.value
+                perp_fee = perp_px * fill_qty * perp_maker_rate
                 perp_fill = ExecutionEvent(
                     inst_type=InstType.USDT_FUTURES,
                     symbol=config.symbols.perp.symbol,
@@ -218,7 +234,7 @@ async def _simulate_fills_loop(
                     side=side,
                     price=perp_px,
                     size=fill_qty,
-                    fee=0.0,
+                    fee=perp_fee,
                     ts=ts,
                 )
                 await oms.ingest_fill(perp_fill, simulated=True, source="sim_fill")
@@ -228,6 +244,7 @@ async def _simulate_fills_loop(
 
                 hedge_side = Side.SELL if side == Side.BUY else Side.BUY
                 spot_px = spot_bbo.ask if hedge_side == Side.BUY else spot_bbo.bid
+                spot_fee = spot_px * fill_qty * spot_taker_rate
                 ticket_id = oms.latest_open_ticket_id() or f"HEDGE-SIM-{int(ts * 1000)}-{seq}"
                 spot_fill = ExecutionEvent(
                     inst_type=InstType.SPOT,
@@ -238,7 +255,7 @@ async def _simulate_fills_loop(
                     side=hedge_side,
                     price=spot_px,
                     size=fill_qty,
-                    fee=0.0,
+                    fee=spot_fee,
                     ts=ts + 0.001,
                 )
                 await oms.ingest_fill(spot_fill, simulated=True, source="sim_fill")

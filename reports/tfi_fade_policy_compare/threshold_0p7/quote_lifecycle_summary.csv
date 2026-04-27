@@ -1,0 +1,2 @@
+policy,quote_count,mean_lifetime_sec,median_lifetime_sec,tfi_fade_end_count,quote_fade_end_count,cancel_aggressive_end_count,order_cancel_quote_count,tfi_fade_suppressed_count
+threshold_0p7,1046,0.31144200707028974,0.24827682971954346,548,457,0,41,86
