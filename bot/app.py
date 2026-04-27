@@ -201,7 +201,6 @@ async def _simulate_fills_loop(
             )
             if perp_snapshot is None:
                 continue
-            perp_bbo = book_md.bbo_from_snapshot(perp_snapshot)
             spot_bbo = book_md.bbo_from_snapshot(spot_snapshot) if spot_snapshot is not None else None
 
             snap = oms.active_quote_snapshot(config.symbols.perp.symbol)

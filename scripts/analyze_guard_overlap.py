@@ -92,7 +92,6 @@ def _summarize(metrics: dict[str, object]) -> dict[str, object]:
     count = len(values)
     success_count = int(metrics["success_count"])
     fail_count = int(metrics["fail_count"])
-    neutral_count = int(metrics["neutral_count"])
     directional_returns = metrics["directional_returns"]
 
     if count == 0:
