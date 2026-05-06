@@ -1734,3 +1734,25 @@ ec1b00a  chore: bulk update after lint & format
 - 自動 flatten / reduceOnly unwind / `funding_off_flatten_enabled` は未実装。
 - `config.yaml` は今回変更していない。
 - 実ポジション `perp=0.02` の決済は未実施。
+
+---
+
+## 2026-05-06 CI import error 修正
+
+### 観測事実
+- GitHub Actions で `bot.oms.oms` import 時に `format_price_for_bitget` / `get_price_tick` / `quantize_perp_price` が `bot.exchange.constraints` に存在しないため collection error。
+- ローカルでは `bot/exchange/constraints.py` が未commit変更として残っていたため pytest が通っていた。
+- `config.yaml` は引き続き未commit変更であり、今回の修正対象外。
+
+### 実装
+- `bot/exchange/constraints.py`
+  - `InstrumentConstraints.price_place` を追加。
+  - `get_price_tick()` / `quantize_perp_price()` / `format_price_for_bitget()` を追加。
+- `tests/test_perp_price_rounding.py`
+  - pricePlace 優先、buy 下丸め、sell 上丸め、payload 文字列 formatting を検証。
+
+### 検証
+- `.venv\Scripts\python.exe -m pytest -q`: 57 passed。
+
+### 未確定点
+- live 再起動、config 変更、実ポジション決済は未実施。
