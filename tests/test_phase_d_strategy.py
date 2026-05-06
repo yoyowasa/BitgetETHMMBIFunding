@@ -30,14 +30,18 @@ class DummyOMS:
         self.unhedged_qty = 0.0
         self.unhedged_since = None
         self.last_update_quotes: dict | None = None
+        self.cancel_reasons: list[str] = []
+        self.flatten_calls: list[dict] = []
 
     async def process_hedge_tickets(self, spot_bbo) -> None:
         return None
 
     async def cancel_all(self, reason: str) -> None:
+        self.cancel_reasons.append(reason)
         return None
 
     async def flatten(self, spot_bbo, cycle_id: int, reason: str) -> None:
+        self.flatten_calls.append({"cycle_id": cycle_id, "reason": reason})
         return None
 
     def fail_open_tickets(self, reason: str) -> None:
@@ -119,3 +123,32 @@ def test_phase_d_microprice_and_tfi(monkeypatch) -> None:
     assert oms.last_update_quotes is not None
     assert oms.last_update_quotes["ask_px"] > oms.last_update_quotes["bid_px"]
     assert any("micro_price" in record for record in logger.records if record.get("event") == "tick")
+
+
+def test_funding_off_open_delta_logs_alert_without_flatten(monkeypatch) -> None:
+    from bot.strategy import mm_funding as module
+
+    monkeypatch.setattr(module.book_md, "snapshot_from_store", _snapshot_from_store)
+    monkeypatch.setattr(module.book_md, "bbo_from_snapshot", lambda snapshot: SimpleNamespace(bid=snapshot.bids[0][0], ask=snapshot.asks[0][0], bid_size=snapshot.bids[0][1], ask_size=snapshot.asks[0][1], ts=snapshot.ts))
+    monkeypatch.setattr(module.book_md, "calc_mid", lambda bbo: (bbo.bid + bbo.ask) / 2.0)
+    monkeypatch.setattr(module.book_md, "calc_microprice", lambda bbo: (bbo.ask * bbo.bid_size + bbo.bid * bbo.ask_size) / (bbo.bid_size + bbo.ask_size))
+    monkeypatch.setattr(module.book_md, "calc_obi", lambda snapshot: 0.0)
+
+    funding_cache = SimpleNamespace(last=FundingInfo(funding_rate=-0.00002, next_update_time=None, interval_sec=None, ts=time.time()))
+    oms = DummyOMS()
+    oms.positions.spot_pos = 0.0
+    oms.positions.perp_pos = 0.02
+    logger = DummyLogger()
+    strategy = MMFundingStrategy(_config(), funding_cache, oms, DummyRisk(), logger)
+
+    import asyncio
+    asyncio.run(strategy.step())
+
+    assert oms.cancel_reasons == ["funding_below_min"]
+    assert oms.flatten_calls == []
+    alerts = [r for r in logger.records if r.get("reason") == "funding_off_open_delta"]
+    assert len(alerts) == 1
+    assert alerts[0]["spot_pos"] == 0.0
+    assert alerts[0]["perp_pos"] == 0.02
+    assert alerts[0]["delta"] == 0.02
+    assert alerts[0]["action"] == "alert_only"

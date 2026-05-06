@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from decimal import Decimal, InvalidOperation
 import time
 import uuid
 from dataclasses import dataclass
@@ -8,7 +9,12 @@ from typing import Optional
 
 from ..config import AppConfig, HedgeConfig
 from ..exchange.bitget_gateway import BitgetGateway
-from ..exchange.constraints import InstrumentConstraints
+from ..exchange.constraints import (
+    InstrumentConstraints,
+    format_price_for_bitget,
+    get_price_tick,
+    quantize_perp_price,
+)
 from ..log.jsonl import JsonlLogger
 from ..log.pnl_logger import PnLAggregator, QuoteMetrics
 from ..marketdata import book as book_md
@@ -112,6 +118,9 @@ class OMS:
         self._quote_orders = 0
         self._quote_fills = 0
         self._adverse_fills = 0
+        self._last_position_log_ts = 0.0
+        self._last_logged_spot_pos: float | None = None
+        self._last_logged_perp_pos: float | None = None
 
     @property
     def positions(self) -> PositionTracker:
@@ -269,7 +278,12 @@ class OMS:
                 reason=reason,
             )
 
-    async def sync_positions(self, timeout_sec: float = 5.0) -> None:
+    async def sync_positions(self, timeout_sec: float = 5.0, poll_interval: float = 5.0) -> None:
+        while True:
+            await self._sync_positions_once(timeout_sec=timeout_sec)
+            await asyncio.sleep(poll_interval)
+
+    async def _sync_positions_once(self, timeout_sec: float = 5.0) -> None:
         positions_store = getattr(self._gateway.store, "positions", None)
         if positions_store is None:
             return
@@ -283,14 +297,32 @@ class OMS:
         if perp_pos is None:
             return
         self._positions.perp_pos = perp_pos
+        now = time.time()
+        changed = (
+            self._last_logged_spot_pos != self._positions.spot_pos
+            or self._last_logged_perp_pos != self._positions.perp_pos
+        )
+        heartbeat_due = (now - self._last_position_log_ts) >= 60.0
+        if not changed and not heartbeat_due:
+            return
+        self._last_logged_spot_pos = self._positions.spot_pos
+        self._last_logged_perp_pos = self._positions.perp_pos
+        self._last_position_log_ts = now
         self._orders_logger.log(
             {
-                "ts": time.time(),
+                "ts": now,
                 "event": "state",
                 "intent": "SYSTEM",
+                "source": "oms",
+                "mode": "RUN",
+                "reason": "positions_sync",
+                "leg": "positions",
                 "state": "positions_sync",
                 "spot_pos": self._positions.spot_pos,
                 "perp_pos": self._positions.perp_pos,
+                "delta": self._positions.spot_pos + self._positions.perp_pos,
+                "unhedged_qty": self._unhedged_qty,
+                "unhedged_since": self._unhedged_since,
             }
         )
 
@@ -697,7 +729,7 @@ class OMS:
         constraints = self._gateway.constraints.get(InstType.USDT_FUTURES)
         if constraints is None or not constraints.is_ready():
             return
-        price = constraints.adjust_price(price)
+        price = float(quantize_perp_price(price, side, constraints))
         size = constraints.adjust_qty(size)
         if size <= 0:
             if existing:
@@ -773,8 +805,18 @@ class OMS:
             )
             return None
 
+        price_before_round = req.price
+        price_tick = None
+        price_place = getattr(constraints, "price_place", None)
+        price_payload = None
         if req.price is not None:
-            req.price = constraints.adjust_price(req.price)
+            if req.inst_type == InstType.USDT_FUTURES:
+                rounded = quantize_perp_price(req.price, req.side, constraints)
+                price_tick = format_price_for_bitget(get_price_tick(constraints))
+                price_payload = format_price_for_bitget(rounded)
+                req.price = float(rounded)
+            else:
+                req.price = constraints.adjust_price(req.price)
         req.size = constraints.adjust_qty(req.size)
         if req.size < constraints.min_qty:
             self._orders_logger.log(
@@ -827,6 +869,11 @@ class OMS:
             "side": req.side.value,
             "type": req.order_type.value,
             "price": req.price,
+            "price_before_round": price_before_round,
+            "price_after_round": req.price,
+            "price_payload": price_payload,
+            "tick_size": price_tick if price_tick is not None else constraints.tick_size,
+            "pricePlace": price_place,
             "size": req.size,
             "force": req.force.value,
             "client_oid": req.client_oid,
@@ -860,6 +907,12 @@ class OMS:
                         "resp_code": resp_code,
                         "reject_streak": streak,
                         "client_oid": req.client_oid,
+                        "price": req.price,
+                        "price_before_round": price_before_round,
+                        "price_after_round": req.price,
+                        "price_payload": price_payload,
+                        "tick_size": price_tick if price_tick is not None else constraints.tick_size,
+                        "pricePlace": price_place,
                     }
                 )
         order_id = _extract_order_id(response)
@@ -1025,7 +1078,17 @@ class OMS:
         if not client_oid and order_id:
             client_oid = self._order_client_map.get(order_id, "")
         price = _first_float(row, ["price", "fillPrice", "tradePrice"]) or 0.0
-        size = _first_float(row, ["size", "fillSz", "tradeQty", "tradeSize"]) or 0.0
+        size = self._extract_fill_size(row, inst_type)
+        if size is None or size <= 0:
+            self._log_fill_parse_warning(
+                row,
+                reason="fill_size_missing_or_zero",
+                inst_type=inst_type,
+                order_id=order_id,
+                client_oid=client_oid,
+                size=size,
+            )
+            return None
         fee = _first_float(row, ["fee", "fillFee"]) or 0.0
         ts = _first_time(row, ["ts", "fillTime", "cTime", "tradeTime"]) or time.time()
         fill_id = _first_string(row, ["tradeId", "fillId", "execId", "id"])
@@ -1042,6 +1105,65 @@ class OMS:
             size=size,
             fee=fee,
             ts=ts,
+        )
+
+    def _extract_fill_size(self, row: dict, inst_type: InstType) -> Optional[float]:
+        if inst_type == InstType.USDT_FUTURES:
+            keys = ["baseVolume", "size", "fillSz", "tradeQty", "tradeSize"]
+        else:
+            keys = ["size", "fillSz", "tradeQty", "tradeSize", "baseVolume"]
+        for key in keys:
+            if key not in row or row[key] is None:
+                continue
+            size = _safe_float(row[key])
+            if size is None:
+                self._log_fill_parse_warning(
+                    row,
+                    reason="fill_size_parse_error",
+                    inst_type=inst_type,
+                    size_key=key,
+                    size_value=row[key],
+                )
+                continue
+            return size
+        return None
+
+    def _log_fill_parse_warning(
+        self,
+        row: dict,
+        *,
+        reason: str,
+        inst_type: InstType,
+        order_id: str | None = None,
+        client_oid: str | None = None,
+        size: float | None = None,
+        size_key: str | None = None,
+        size_value: object | None = None,
+    ) -> None:
+        self._orders_logger.log(
+            {
+                "ts": time.time(),
+                "event": "risk",
+                "intent": "SYSTEM",
+                "source": "oms",
+                "mode": "RUN",
+                "reason": reason,
+                "leg": "fill",
+                "inst_type": inst_type.value,
+                "symbol": row.get("instId") or row.get("symbol"),
+                "order_id": order_id or _first_string(row, ["orderId", "order_id", "ordId"]),
+                "client_oid": client_oid
+                or _first_string(row, ["clientOid", "clientOrderId", "client_oid"]),
+                "fill_id": _first_string(row, ["tradeId", "fillId", "execId", "id"]),
+                "size": size,
+                "size_key": size_key,
+                "size_value": None if size_value is None else str(size_value),
+                "available_size_fields": {
+                    key: row.get(key)
+                    for key in ("baseVolume", "size", "fillSz", "tradeQty", "tradeSize")
+                    if key in row
+                },
+            }
         )
 
     def _perp_pos_from_store(self, positions_store) -> Optional[float]:
@@ -1116,11 +1238,17 @@ def _first_string(row: dict, keys: list[str]) -> Optional[str]:
 def _first_float(row: dict, keys: list[str]) -> Optional[float]:
     for key in keys:
         if key in row and row[key] is not None:
-            try:
-                return float(row[key])
-            except (TypeError, ValueError):
-                continue
+            value = _safe_float(row[key])
+            if value is not None:
+                return value
     return None
+
+
+def _safe_float(value: object) -> Optional[float]:
+    try:
+        return float(Decimal(str(value)))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
 
 
 def _first_time(row: dict, keys: list[str]) -> Optional[float]:

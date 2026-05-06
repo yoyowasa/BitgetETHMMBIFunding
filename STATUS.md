@@ -1557,3 +1557,180 @@ ec1b00a  chore: bulk update after lint & format
 - DRY_RUN=0 PnL 実測未実施 (資金確保待ち)。
 - 実 fill 率係数。adverse selection の実環境影響。
 - `quote_replace_count` が min_funding=0 設定で 11→34/分に増加した理由 (要分析候補)。
+---
+
+## 2026-05-02 45115 price tick multiple 前提更新 / PERP price rounding 修正
+
+### 観測事実
+- `orders.jsonl` 末尾の `resp_code=45115` は、cancel race ではなく Bitget 公式エラーコード上の price tick / multiple 不整合 reject として扱う。
+- `config.yaml` は `dry_run: false`、`.env` は `DRY_RUN="0"` のため、DRY_RUN=0 の再起動は禁止。
+- `decision.jsonl` / `orders.jsonl` は 2026-04-30 06:52:05 JST で停止し、`system.jsonl` / `pnl.jsonl` は更新継続。
+- `validate_logs_strict.ps1 -LogDir logs` は既存ログに対して `halt_strict_violation=7657` で FAIL。
+
+### 実装
+- `bot/exchange/constraints.py`
+  - `get_price_tick` 追加。PERP constraints の `pricePlace` がある場合は `10 ** -pricePlace` を tick とする。
+  - `quantize_perp_price` 追加。Decimal で buy は下方向、sell は上方向へ tick multiple 丸め。
+  - `format_price_for_bitget` 追加。Decimal を REST payload 用文字列へ変換。
+- `bot/exchange/bitget_gateway.py`
+  - `_parse_perp_constraints` / `_parse_spot_constraints` で `price_place` を保持。
+  - PERP `place_order` 直前で Decimal による最終丸めを実施し、price を文字列 payload に変換。
+- `bot/oms/oms.py`
+  - quote upsert と submit 前の PERP price 丸めを side-aware Decimal rounding に変更。
+  - `order_new` と `order_reject` ログへ `price_before_round` / `price_after_round` / `price_payload` / `tick_size` / `pricePlace` を追加。
+- `config.yaml`
+  - `reject_streak_limit: 10` 変更は中止し、`5` に戻した。
+- `tests/test_perp_price_rounding.py`
+  - tick `0.01` / `0.1` / `0.001` で buy 下丸め、sell 上丸めを確認する単体テストを追加。
+
+### 推論
+- 45115 再発防止の主対象は reject_streak 緩和ではなく、PERP order price の tick multiple 丸めと constraints 適用経路。
+- `45115` は reject_streak から除外しない。
+- 実発注再起動は未実施。
+
+### 検証
+- `.venv\Scripts\python.exe -m ruff check bot tests`: pass。
+- `.venv\Scripts\python.exe -m pytest`: 51 passed。
+
+### 未確定点
+- DRY_RUN=0 での再起動・実発注検証は未実施。
+- 既存稼働プロセスは停止・再起動していない。
+
+---
+
+## 2026-05-02 再稼働後 price tick rounding 確認
+
+### 観測事実
+- 新 PID: `20268`
+- 実行: `.venv\Scripts\python.exe -m bot.app --config config.yaml`
+- 起動時刻相当: `2026-05-02 01:43:17 JST`
+- `DRY_RUN=0`
+- private WS 有効。
+- `constraints_loaded`: `spot_ready=true`, `perp_ready=true`
+- public/private WS 接続済み。
+- 再稼働後 `order_new`: `0`
+- 再稼働後 `45115`: `0`
+- 再稼働後 `order_reject`: `0`
+- 現在は `enable_only_positive_funding=true` かつ `funding_rate=-5.1e-05` のため `funding_off`。
+- `final_should_quote_bid/ask` が true の局面でも、最終 action は `funding_off`。
+- active quote はない。
+
+### 推論
+- 45115 再発は現時点で確認されていない。
+- ただし再稼働後に `order_new` が出ていないため、price tick rounding 修正の live 検証は未完了。
+
+### 次回確認
+- 次回 positive funding で `order_new` が出たときに、`price_before_round` / `price_after_round` / `price_payload` / `tick_size` / `pricePlace` のログを確認する。
+- funding gate を DRY_RUN=0 で無理に外して検証しない。
+- 実発注確認は自然に quote 条件が満たされたタイミングで行う。
+
+### 実装変更
+- なし。
+
+---
+
+## 2026-05-04 稼働レビュー指摘 1-4 修正
+
+### 観測事実
+- 稼働中 PID `20268` は `.venv\Scripts\python.exe -m bot.app --config config.yaml` の実プロセス。
+- 直近ログでは `order_new/order_cancel` は継続し、`resp_code=00000` のみ。直近 30 分の fill は 0。
+- `decision.jsonl` は約 5GB まで肥大化しており、既存 `JsonlLogger` は append のみでローテーション無しだった。
+- `oms.sync_positions()` は task として起動されていたが、実装は一回同期して終了する形だった。
+
+### 実装
+- `config.yaml`
+  - 約定ゼロ対策として `strategy.base_half_spread_bps: 14.0`、`strategy.min_half_spread_bps: 14.0` に変更。
+  - 18bps からの段階的な引き下げ。稼働中プロセスには再起動まで反映されない。
+- `bot/log/jsonl.py`
+  - JSONL ロガーへサイズローテーション、日次ローテーション、rotated file の gzip 圧縮を追加。
+  - 既定: `LOG_ROTATE_MAX_BYTES=536870912`、`LOG_ROTATE_DAILY=1`、`LOG_ROTATE_GZIP=1`。
+  - gzip は書き込みブロックを避けるため background thread で実行。
+- `bot/app.py`
+  - `runtime_heartbeat` を 60 秒ごとに `system.jsonl` へ記録。PID / PPID / Python executable を監視可能にした。
+- `bot/oms/oms.py`
+  - `sync_positions()` を定期ループ化し、起動時 1 回だけで終わらないよう修正。
+  - positions 変更時または 60 秒ごとに `positions_sync` を記録し、`delta` / `unhedged_qty` / `unhedged_since` を追加。
+- `scripts/start_bot.ps1`
+  - PID ファイル検証を `Get-CimInstance Win32_Process` の command line 照合へ強化。
+  - stdout/stderr を run id 付きファイルへ分離し、`logs/bot.run.json` に PID / run_id / log path / command を保存。
+- `scripts/stop_bot.ps1`
+  - 実挙動に合わせて停止メッセージとコメントを修正。
+- `tests/test_jsonl_rotation.py`
+  - size / daily rotation の単体テストを追加。
+
+### 検証
+- `.venv\Scripts\python.exe -m py_compile bot\log\jsonl.py bot\oms\oms.py bot\app.py`: pass。
+- `.venv\Scripts\python.exe -m pytest -q`: 53 passed。
+
+### 推論
+- 14bps は 18bps より fill 率改善を狙う一方、8bps へ即戻しするより EV 悪化リスクを抑える中間値。
+- `sync_positions()` の一回終了は、未ヘッジ/target inventory 監視の信頼性を下げる構造問題だった。
+- ログローテーションは次回プロセス起動後から有効。既存 5GB ファイルは初回ローテーション対象になる。
+
+### 未確定点
+- 稼働中プロセスは停止・再起動していないため、14bps 設定、runtime heartbeat、定期 position sync、ログローテーションの live 反映は未実施。
+- 14bps で実 fill 率が改善するかは未検証。
+- 既存 5GB `decision.jsonl` の gzip 圧縮にかかる時間・I/O 負荷は未測定。
+
+---
+
+## 2026-05-06 live STOPPED/funding_off 片脚ポジション調査
+
+### 観測事実
+- 稼働中プロセスは `pid=20752` / `ppid=6440` で、`python -m bot.app --config config.yaml` が継続稼働中。
+- `dry_run=false`、直近 `decision.jsonl` は `mode=STOPPED` / `reason=funding_off`、`funding_rate=-2.5e-05` 付近。
+- `orders.jsonl` の `positions_sync` は `spot_pos=0.0` / `perp_pos=0.02` / `delta=0.02` を 2026-05-04 17:05:05 以降継続記録。
+- read-only private WS 追加確認で Bitget raw positions に `ETHUSDT long total=0.02 available=0.02 openPriceAvg=2353.255 posMode=one_way_mode` を確認。
+- 最後の quote order は 2026-05-06 10:36:41 `QUOTE_ASK sell 0.02 @ 2375.6`、2026-05-06 10:36:43 に `funding_below_min` で cancel。
+- `max_unhedged_notional` は `pnl.jsonl` 集計上 0 のまま。`unhedged_exceeded` / `max_position` / `flatten` 発火ログは確認できない。
+- `fills.jsonl` は futures fill 4 件すべて `size=0.0`。旧 MVP parser は futures fill quantity に `baseVolume` を読んでいたが、現行 `OMS._parse_fill()` は `baseVolume` を候補に含めていない。
+
+### 推論
+- `perp_pos=0.02` はログ上の古い値ではなく、private WS positions 由来の実ポジション。
+- `funding_off` 分岐は `cancel_all(reason="funding_below_min")` 後に return するため、既存 position を flatten する設計になっていない。
+- unhedged guard は `_oms.unhedged_qty` ベースで、positions sync の `delta=0.02` を直接見ないため、今回の片脚 delta では発火しない。
+- `perp 0.02 * mid 約2376 = 約47.5 USDT` は `max_position_notional=100` 未満のため、max position flatten も発火しない。
+- fill size 0.0 は Bitget futures private fill の数量フィールドが `baseVolume` で、現行 parser が拾えていない可能性が高い。
+
+### 未確定点
+- REST positions API での独立確認は未実施。private WS raw positions では実ポジションを確認済み。
+- `baseVolume` 欠落修正後の fill parser 再現テストは未実施。
+- 自動 flatten / unwind 実装、config 変更、live 再起動、実ポジション決済は未実施。
+
+---
+
+## 2026-05-06 fill parser / funding_off open delta alert 修正
+
+### 観測事実
+- `fills.jsonl` の futures fill が `size=0.0` になる原因候補は、現行 `OMS._parse_fill()` が Bitget futures fill の数量候補に `baseVolume` を含めていなかったこと。
+- 旧 MVP parser では futures fill quantity に `baseVolume` を読んでいた。
+- `perp=0.02` は private WS raw positions で確認済みの実ポジションであり、別途運用判断が必要。
+
+### 実装
+- `bot/oms/oms.py`
+  - `OMS._parse_fill()` の futures fill size 候補を `baseVolume`, `size`, `fillSz`, `tradeQty`, `tradeSize` に変更。
+  - `_extract_fill_size()` を追加し、数量フィールドを候補順に抽出。
+  - `_safe_float()` を `Decimal(str(value))` ベースにし、文字列/数値を安全に float 化。
+  - size 欠落、変換不能、または `size <= 0` の fill は正常約定として扱わず、`fill_size_parse_error` / `fill_size_missing_or_zero` を risk log に出す。
+- `bot/strategy/mm_funding.py`
+  - funding gate の `cancel_all(reason="funding_below_min")` は維持。
+  - `check_open_delta_while_stopped()` / `log_open_delta_alert()` を追加。
+  - `STOPPED` / `funding_off` 中に `abs(spot_pos + perp_pos) > delta_tolerance` の場合、`funding_off_open_delta` を risk log に出す。
+  - alert は `spot_pos`, `perp_pos`, `delta`, `delta_tolerance`, `funding_rate`, `mode`, `trigger_reason`, `action=alert_only` を含む。
+- `tests/test_fill_parser.py`
+  - futures raw fill の `baseVolume="0.02"` が `size=0.02` になることを追加検証。
+  - 既存候補 `size` / `fillSz` / `tradeQty` / `tradeSize` が壊れていないことを検証。
+  - zero size fill を reject し warning log を出すことを検証。
+- `tests/test_phase_d_strategy.py`
+  - `funding_off` 中に `spot=0.0` / `perp=0.02` の場合、flatten せず `funding_off_open_delta` risk log だけ出ることを検証。
+
+### 検証
+- `.venv\Scripts\python.exe -m py_compile bot\oms\oms.py bot\strategy\mm_funding.py`: pass。
+- `.venv\Scripts\python.exe -m pytest tests\test_fill_parser.py tests\test_phase_d_strategy.py -q`: 5 passed。
+- `.venv\Scripts\python.exe -m pytest -q`: 57 passed。
+
+### 未確定点
+- live 再起動は未実施のため、稼働中プロセスには未反映。
+- 自動 flatten / reduceOnly unwind / `funding_off_flatten_enabled` は未実装。
+- `config.yaml` は今回変更していない。
+- 実ポジション `perp=0.02` の決済は未実施。

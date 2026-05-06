@@ -54,6 +54,8 @@ class MMFundingStrategy:
         self._state = StrategyState.STOPPED
         self._cycle_id = 0
         self._last_quote_fade_ts: float | None = None
+        self._last_open_delta_alert_ts = 0.0
+        self._last_open_delta_alert_key: tuple[float, float] | None = None
 
     async def run(self) -> None:
         interval = self._config.strategy.quote_refresh_ms / 1000.0
@@ -566,6 +568,11 @@ class MMFundingStrategy:
         if self._config.strategy.enable_only_positive_funding and funding.funding_rate < self._config.strategy.min_funding_rate:
             self._state = StrategyState.STOPPED
             await self._oms.cancel_all(reason="funding_below_min")
+            self.check_open_delta_while_stopped(
+                now=now,
+                funding_rate=funding.funding_rate,
+                reason="funding_off",
+            )
             self._log_decision(
                 now,
                 spot_bbo,
@@ -858,6 +865,69 @@ class MMFundingStrategy:
             target_q,
             action,
             tfi,
+        )
+
+    def check_open_delta_while_stopped(
+        self,
+        *,
+        now: float,
+        funding_rate: float | None,
+        reason: str,
+    ) -> bool:
+        spot_pos = self._oms.positions.spot_pos
+        perp_pos = self._oms.positions.perp_pos
+        delta = spot_pos + perp_pos
+        if abs(delta) <= self._config.strategy.delta_tolerance:
+            return False
+        self.log_open_delta_alert(
+            now=now,
+            spot_pos=spot_pos,
+            perp_pos=perp_pos,
+            delta=delta,
+            funding_rate=funding_rate,
+            reason=reason,
+        )
+        return True
+
+    def log_open_delta_alert(
+        self,
+        *,
+        now: float,
+        spot_pos: float,
+        perp_pos: float,
+        delta: float,
+        funding_rate: float | None,
+        reason: str,
+    ) -> None:
+        alert_key = (round(spot_pos, 12), round(perp_pos, 12))
+        if (
+            self._last_open_delta_alert_key == alert_key
+            and now - self._last_open_delta_alert_ts < 60.0
+        ):
+            return
+        self._last_open_delta_alert_key = alert_key
+        self._last_open_delta_alert_ts = now
+        self._decision_logger.log(
+            {
+                "ts": now,
+                "event": "risk",
+                "intent": "SYSTEM",
+                "source": "strategy",
+                "mode": self._state.value,
+                "reason": "funding_off_open_delta"
+                if reason == "funding_off"
+                else "stopped_with_open_delta",
+                "leg": "positions",
+                "cycle_id": self._cycle_id,
+                "state": self._state.value,
+                "spot_pos": spot_pos,
+                "perp_pos": perp_pos,
+                "delta": delta,
+                "delta_tolerance": self._config.strategy.delta_tolerance,
+                "funding_rate": funding_rate,
+                "trigger_reason": reason,
+                "action": "alert_only",
+            }
         )
 
     def _pre_quote_edge_fields(self, funding_rate: float | None) -> dict[str, float | None]:
