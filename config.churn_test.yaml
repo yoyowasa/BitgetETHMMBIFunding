@@ -1,0 +1,76 @@
+exchange:
+  name: bitget
+  base_url: "https://api.bitget.com"
+  ws_public: "wss://ws.bitget.com/v2/ws/public"
+  ws_private: "wss://ws.bitget.com/v2/ws/private"
+
+apis:
+  bitget:
+    - "YOUR_API_KEY"         # BitgetのAPI Key
+    - "YOUR_API_SECRET"      # BitgetのSecret
+    - "YOUR_API_PASSPHRASE"  # BitgetのPassphrase（Bitget側で「password」と呼ばれることもある）
+symbols:
+  spot: { instType: "SPOT", symbol: "ETHUSDT" }
+  perp:
+    instType: "USDT-FUTURES"
+    symbol: "ETHUSDT"
+    productType: "USDT-FUTURES"
+    marginMode: "isolated"
+    marginCoin: "USDT"
+
+risk:
+  stale_sec: 2.0
+  book_boot_timeout_sec: 2.0
+  book_stale_sec: 6.0
+  controlled_reconnect_grace_sec: 3.0
+  funding_stale_sec: 120.0
+  max_unhedged_sec: 2.0
+  max_unhedged_notional: 30
+  max_position_notional: 100
+  cooldown_sec: 30
+  reject_streak_limit: 5
+
+strategy:
+  enable_only_positive_funding: true
+  min_funding_rate: 0.0
+  target_notional: 50
+  delta_tolerance: 0.01
+  obi_levels: 5
+  alpha_obi_bps: 1.0
+  gamma_inventory_bps: 2.0
+  base_half_spread_bps: 14.0
+  fade_vol_bps: 3.0
+  quote_fade_policy: threshold_8bps
+  aggressive_trade_proximity_bps: 1.0
+  cancel_aggressive_policy: current
+  cancel_aggressive_scope: active_quote_only
+  cancel_aggressive_quality_filter: fresh_active_quote_proximity
+  cancel_aggressive_max_trade_age_ms: 500.0
+  cancel_aggressive_active_proximity_bps: 1.0
+  one_sided_quote_policy: current
+  tfi_fade_threshold: 0.6
+  tfi_fade_policy: disabled
+  reprice_threshold_bps: 2.5
+  adverse_fill_horizon_sec: 2.0
+  adverse_buffer_bps: 2.0
+  k_tfi_bps: 1.0
+  funding_skew_bps_per_rate: 1000.0
+  target_inventory_max_ratio: 1.0
+  funding_window_sec: 300.0
+  min_half_spread_bps: 14.0
+  quote_refresh_ms: 500
+  dry_run: false
+
+hedge:
+  use_spot_limit_ioc: true
+  hedge_aggressive_bps: 5.0
+  hedge_deadline_sec: 1.5
+  hedge_max_tries: 2
+  hedge_chase_slip_bps: 5.0
+  unwind_enable: true
+
+cost:
+  # 実測 (2026-04-27 /api/v2/common/trade-rate): perp maker=mix VIP3 相当 1.4bps, spot taker=VIP0 10.0bps
+  fee_maker_perp_bps: 1.4
+  fee_taker_spot_bps: 10.0
+  slippage_bps: 2.0
