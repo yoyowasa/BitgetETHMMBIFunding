@@ -252,6 +252,12 @@ class BitgetGateway:
         data = {"productType": perp.productType, "posMode": pos_mode}
         return await self.rest_post("/api/v2/mix/account/set-position-mode", data)
 
+    async def get_spot_available_balance(self, base_coin: str) -> Optional[float]:
+        payload = await self.rest_get("/api/v2/spot/account/assets", params={"coin": base_coin})
+        data = payload.get("data")
+        rows = data if isinstance(data, list) else [data]
+        return _available_spot_balance_from_rows(rows, base_coin)
+
     async def load_constraints(self) -> ConstraintsRegistry:
         spot = self.config.symbols.spot
         perp = self.config.symbols.perp
@@ -697,6 +703,21 @@ def _safe_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _available_spot_balance_from_rows(rows: list, base_coin: str) -> Optional[float]:
+    base_coin_upper = base_coin.upper()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        coin = row.get("coin") or row.get("coinName") or row.get("currency") or row.get("asset")
+        if coin is not None and str(coin).upper() != base_coin_upper:
+            continue
+        for key in ("available", "availableBalance", "availableAmount", "free", "normalBalance"):
+            available = _safe_float(row.get(key))
+            if available is not None:
+                return available
+    return None
 
 
 def _safe_ts(value: Any) -> float | None:

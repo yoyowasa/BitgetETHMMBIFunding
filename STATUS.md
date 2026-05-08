@@ -1800,3 +1800,36 @@ ec1b00a  chore: bulk update after lint & format
 ### 未確定点
 - SPOT available ETH を実際に同期する経路は未実装。次段では private balance channel または read-only REST `get_spot_available_balance(base_coin)` を追加し、`available < sell_size` の場合は `order_new` を出さず `order_skip` / `risk` にする案が必要。
 - 稼働中 live process への反映は未実施。live 再起動、config 変更、実ポジション決済は未実施。
+
+---
+
+## 2026-05-08 SPOT flatten available blocking precheck 追加
+
+### 観測事実
+- 前回修正時点では SPOT sell flatten 前の available precheck は warning のみで、available 不足を検知しても `_submit_order()` に進む構造だった。
+- `43012` は Bitget Spot REST error code 上の Insufficient balance として扱う。
+
+### 実装
+- `bot/exchange/bitget_gateway.py`
+  - `get_spot_available_balance(base_coin)` を追加。
+  - `/api/v2/spot/account/assets` の `data` から `coin` が一致する行を探し、`available` / `availableBalance` / `availableAmount` / `free` / `normalBalance` を候補として抽出。
+- `bot/oms/oms.py`
+  - `_precheck_spot_flatten_available()` を追加。
+  - SPOT `FLATTEN` sell の `client_oid` 生成後、`order_new` 前に available base coin を確認。
+  - `available < sell_size` の場合は live 注文を出さず、`event=order_skip` / `reason=spot_flatten_insufficient_available_precheck` / `state=blocked_precheck` を出して停止。
+  - available 取得不能時は `reason=spot_flatten_available_precheck_unavailable` の warning を出し、既存挙動維持として `_submit_order()` に進む。
+  - ログには `intent` / `inst_type` / `symbol` / `side` / `sell_size` / `spot_available` / `spot_pos_internal` / `perp_pos_internal` / `delta` / `client_oid` / `cycle_id` を含める。
+- `tests/test_spot_balance_precheck.py`
+  - `available=0.0` / `sell_size=0.04` で `order_new` なし、`order_skip` になることを検証。
+  - `available=0.02` / `sell_size=0.04` で `order_new` なし、`order_skip` になることを検証。
+  - `available=0.05` / `sell_size=0.04` で従来どおり submit に進むことを検証。
+  - available 取得不能時は warning を出し、従来どおり submit に進むことを検証。
+
+### 検証
+- `.venv\Scripts\python -m py_compile bot\oms\oms.py bot\exchange\bitget_gateway.py tests\test_spot_balance_precheck.py`: pass。
+- `.venv\Scripts\python -m pytest tests/test_spot_balance_precheck.py -q`: 4 passed。
+- `.venv\Scripts\python -m pytest -q`: 65 passed。
+
+### 未確定点
+- live 再起動は未実施のため、稼働中プロセスには未反映。
+- 実ポジション決済、config 変更、funding gate 変更、quote churn 対策、自動 flatten policy 追加は未実施。

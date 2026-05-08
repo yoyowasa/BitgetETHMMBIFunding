@@ -263,16 +263,17 @@ class OMS:
             side = Side.SELL if self._positions.spot_pos > 0 else Side.BUY
             size = abs(self._positions.spot_pos)
             price = spot_bbo.ask if side == Side.BUY else spot_bbo.bid
+            client_oid = self._new_client_oid(OrderIntent.FLATTEN, cycle_id)
             if side == Side.SELL:
-                base_coin = self._spot_base_coin()
-                spot_available = self._spot_available_balance(base_coin)
-                self._log_spot_flatten_available_precheck(
+                allowed = await self._precheck_spot_flatten_available(
                     cycle_id=cycle_id,
-                    spot_available=spot_available,
                     sell_size=size,
                     symbol=self._config.symbols.spot.symbol,
-                    base_coin=base_coin,
+                    side=side,
+                    client_oid=client_oid,
                 )
+                if not allowed:
+                    return
             await self._submit_order(
                 OrderRequest(
                     inst_type=InstType.SPOT,
@@ -281,7 +282,7 @@ class OMS:
                     order_type=OrderType.LIMIT,
                     size=size,
                     force=Force.IOC,
-                    client_oid=self._new_client_oid(OrderIntent.FLATTEN, cycle_id),
+                    client_oid=client_oid,
                     intent=OrderIntent.FLATTEN,
                     cycle_id=cycle_id,
                     price=price,
@@ -1270,6 +1271,63 @@ class OMS:
                 return available
         return None
 
+    async def _get_spot_available_balance(self, base_coin: str) -> Optional[float]:
+        getter = getattr(self._gateway, "get_spot_available_balance", None)
+        if callable(getter):
+            try:
+                result = getter(base_coin)
+                if hasattr(result, "__await__"):
+                    result = await result
+                if result is not None:
+                    return float(result)
+            except Exception:
+                pass
+        return self._spot_available_balance(base_coin)
+
+    async def _precheck_spot_flatten_available(
+        self,
+        *,
+        cycle_id: int,
+        sell_size: float,
+        symbol: str,
+        side: Side,
+        client_oid: str,
+    ) -> bool:
+        base_coin = self._spot_base_coin()
+        spot_available = await self._get_spot_available_balance(base_coin)
+        if spot_available is None:
+            self._log_spot_flatten_available_precheck(
+                cycle_id=cycle_id,
+                spot_available=None,
+                sell_size=sell_size,
+                symbol=symbol,
+                base_coin=base_coin,
+                side=side,
+                client_oid=client_oid,
+            )
+            return True
+        if spot_available + 1e-12 < sell_size:
+            self._log_spot_flatten_available_skip(
+                cycle_id=cycle_id,
+                spot_available=spot_available,
+                sell_size=sell_size,
+                symbol=symbol,
+                base_coin=base_coin,
+                side=side,
+                client_oid=client_oid,
+            )
+            return False
+        self._log_spot_flatten_available_precheck(
+            cycle_id=cycle_id,
+            spot_available=spot_available,
+            sell_size=sell_size,
+            symbol=symbol,
+            base_coin=base_coin,
+            side=side,
+            client_oid=client_oid,
+        )
+        return True
+
     def _log_spot_flatten_available_precheck(
         self,
         *,
@@ -1278,12 +1336,11 @@ class OMS:
         sell_size: float,
         symbol: str,
         base_coin: str,
+        side: Side,
+        client_oid: str,
     ) -> None:
-        insufficient = spot_available is not None and spot_available + 1e-12 < sell_size
         if spot_available is None:
             reason = "spot_flatten_available_precheck_unavailable"
-        elif insufficient:
-            reason = "spot_flatten_insufficient_available_precheck"
         else:
             reason = "spot_flatten_available_precheck"
         self._orders_logger.log(
@@ -1296,14 +1353,52 @@ class OMS:
                 "reason": reason,
                 "leg": "spot",
                 "cycle_id": cycle_id,
+                "inst_type": InstType.SPOT.value,
+                "symbol": symbol,
+                "side": side.value,
+                "client_oid": client_oid,
                 "spot_pos_internal": self._positions.spot_pos,
                 "perp_pos_internal": self._positions.perp_pos,
                 "delta": self._positions.spot_pos + self._positions.perp_pos,
                 "spot_available": spot_available,
                 "sell_size": sell_size,
-                "symbol": symbol,
                 "base_coin": base_coin,
                 "action": "warn_only",
+            }
+        )
+
+    def _log_spot_flatten_available_skip(
+        self,
+        *,
+        cycle_id: int,
+        spot_available: float,
+        sell_size: float,
+        symbol: str,
+        base_coin: str,
+        side: Side,
+        client_oid: str,
+    ) -> None:
+        self._orders_logger.log(
+            {
+                "ts": time.time(),
+                "event": "order_skip",
+                "intent": OrderIntent.FLATTEN.value,
+                "source": "oms",
+                "mode": "RUN",
+                "reason": "spot_flatten_insufficient_available_precheck",
+                "state": "blocked_precheck",
+                "leg": "spot",
+                "cycle_id": cycle_id,
+                "inst_type": InstType.SPOT.value,
+                "symbol": symbol,
+                "side": side.value,
+                "client_oid": client_oid,
+                "spot_pos_internal": self._positions.spot_pos,
+                "perp_pos_internal": self._positions.perp_pos,
+                "delta": self._positions.spot_pos + self._positions.perp_pos,
+                "spot_available": spot_available,
+                "sell_size": sell_size,
+                "base_coin": base_coin,
             }
         )
 
