@@ -1833,3 +1833,45 @@ ec1b00a  chore: bulk update after lint & format
 ### 未確定点
 - live 再起動は未実施のため、稼働中プロセスには未反映。
 - 実ポジション決済、config 変更、funding gate 変更、quote churn 対策、自動 flatten policy 追加は未実施。
+
+---
+
+## 2026-05-08 SPOT fee 建て accounting / startup reconciliation 追加
+
+### 観測事実
+- read-only REST 確認で SPOT ETH available は `0.039940000718 ETH`。
+- read-only REST 確認で Futures `ETHUSDT` position は `0.0`、open orders は spot/perp とも 0 件。
+- bot 内部最終 state は `HALTED`、内部 position は `spot=0.04` / `perp=0.0` / `delta=0.04`。
+- 実 available と内部 `spot=0.04` の差分 `0.000059999282 ETH` は、SPOT buy 合計 `0.06 ETH` に対する base coin fee `0.00006 ETH` と整合する可能性が高い。
+
+### 実装
+- `bot/types.py`
+  - `ExecutionEvent.fee_coin` を optional field として追加。
+- `bot/oms/oms.py`
+  - `_extract_fill_fee()` を fee amount と fee coin の抽出に拡張。
+  - top-level `feeCoin` / `feeCurrency` / `feeCcy` 系と、`feeDetail` 内の `feeCoin` / `feeCurrency` / `feeCcy` / `coin` / `currency` を候補として読む。
+  - `_spot_position_delta_after_fee()` を追加し、SPOT buy で fee coin が base coin の場合は `size - abs(fee)` を spot_pos に反映。
+  - SPOT sell で fee coin が quote coin の場合は従来どおり `-size` を反映。
+  - SPOT fee が非ゼロで fee coin 不明の場合は `fill_parse_warning` / `parse_reason=spot_fee_coin_missing` を raw keys 付きで出し、position は従来どおり size で処理。
+  - `reconcile_startup_spot_balance()` を追加し、起動時に `get_spot_available_balance(base_coin)` と内部 `spot_pos` を比較。
+  - live で `actual_spot_available` が tolerance 超過かつ内部が flat なら `startup_open_spot_balance_detected` を risk log に出し、`risk.halt()` で quote 開始前に HALTED 側へ倒す。自動補正・決済はしない。
+- `bot/app.py`
+  - live private 起動時、pos mode 確認後 / funding preflight 前に startup SPOT balance reconciliation を実行。
+- `tests/test_fill_parser.py`
+  - SPOT buy `size=0.06` / `fee=0.00006 ETH` で `spot_pos=0.05994` になることを検証。
+  - その後 SPOT sell `size=0.02` / fee coin `USDT` で `spot_pos=0.03994` になることを検証。
+  - fee coin `USDT` の SPOT buy は `spot_pos=size` のままになることを検証。
+  - fee coin 不明時に warning が出て、position は従来どおり size で処理されることを検証。
+- `tests/test_startup_reconciliation.py`
+  - startup actual available `0.03994` / internal `0.0` の live 起動で `startup_open_spot_balance_detected` を出して risk halt することを検証。
+  - dry_run では warning のみにすることを検証。
+  - internal `0.04` / actual `0.039940000718` は tolerance 内として reconciled になることを検証。
+
+### 検証
+- `.venv\Scripts\python -m py_compile bot\types.py bot\oms\oms.py bot\app.py bot\exchange\bitget_gateway.py tests\test_fill_parser.py tests\test_startup_reconciliation.py`: pass。
+- `.venv\Scripts\python -m pytest tests/test_fill_parser.py tests/test_startup_reconciliation.py tests/test_spot_balance_precheck.py -q`: 18 passed。
+- `.venv\Scripts\python -m pytest -q`: 72 passed。
+
+### 未確定点
+- live 再起動は未実施のため、稼働中プロセスには未反映。
+- 実ポジション決済、config 変更、funding gate 変更、自動 flatten policy 追加、quote churn 対策は未実施。

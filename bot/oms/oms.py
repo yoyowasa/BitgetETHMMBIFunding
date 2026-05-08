@@ -78,10 +78,10 @@ class PositionTracker:
         self.perp_pos = 0.0
 
     def apply_fill(self, event: ExecutionEvent) -> None:
-        delta = event.size if event.side == Side.BUY else -event.size
         if event.inst_type == InstType.SPOT:
-            self.spot_pos += delta
+            self.spot_pos += _spot_position_delta_after_fee(event)
         elif event.inst_type == InstType.USDT_FUTURES:
+            delta = event.size if event.side == Side.BUY else -event.size
             self.perp_pos += delta
 
 
@@ -454,6 +454,7 @@ class OMS:
                 "price": event.price,
                 "size": event.size,
                 "fee": event.fee,
+                "fee_coin": event.fee_coin,
                 "intent": None if intent is None else intent.value,
                 "ticket_id": ticket_id,
                 "hedge_latency_ms": self._hedge_latency_ms(event, ticket_id),
@@ -462,6 +463,31 @@ class OMS:
             }
         )
         self._positions.apply_fill(event)
+        if (
+            event.inst_type == InstType.SPOT
+            and event.fee_coin
+            and event.fee_coin.upper() == self._spot_base_coin().upper()
+            and event.fee != 0
+        ):
+            self._orders_logger.log(
+                {
+                    "ts": time.time(),
+                    "event": "risk",
+                    "intent": "SYSTEM",
+                    "source": "oms",
+                    "mode": "RUN",
+                    "reason": "spot_position_fee_adjusted",
+                    "leg": "fill",
+                    "inst_type": event.inst_type.value,
+                    "symbol": event.symbol,
+                    "side": event.side.value,
+                    "size": event.size,
+                    "fee": event.fee,
+                    "fee_coin": event.fee_coin,
+                    "position_delta": _spot_position_delta_after_fee(event),
+                    "spot_pos_internal": self._positions.spot_pos,
+                }
+            )
         if self._pnl is not None:
             self._pnl.record_fees(abs(event.fee))
         if intent == OrderIntent.HEDGE or ticket_id is not None:
@@ -1129,7 +1155,17 @@ class OMS:
                 size=size,
             )
             return None
-        fee = self._extract_fill_fee(row)
+        fee, fee_coin = self._extract_fill_fee(row)
+        if inst_type == InstType.SPOT and fee != 0 and not fee_coin:
+            self._log_fill_parse_warning(
+                row,
+                parse_reason="spot_fee_coin_missing",
+                inst_type=inst_type,
+                order_id=order_id,
+                client_oid=client_oid,
+                price=price,
+                size=size,
+            )
         ts = _first_time(row, ["ts", "fillTime", "cTime", "tradeTime"]) or time.time()
         fill_id = _first_string(row, ["tradeId", "fillId", "execId", "id"])
         if not fill_id:
@@ -1145,6 +1181,7 @@ class OMS:
             size=size,
             fee=fee,
             ts=ts,
+            fee_coin=fee_coin,
         )
 
     def _extract_fill_price(self, row: dict, inst_type: InstType) -> Optional[float]:
@@ -1189,16 +1226,26 @@ class OMS:
             return size
         return None
 
-    def _extract_fill_fee(self, row: dict) -> float:
+    def _extract_fill_fee(self, row: dict) -> tuple[float, Optional[str]]:
         fee = _first_float(row, ["fee", "fillFee", "transactionFee", "totalFee"])
+        fee_coin = _first_string(
+            row,
+            ["feeCoin", "feeCurrency", "feeCcy", "feeCurrencyCode", "feeCoinName"],
+        )
         if fee is not None:
-            return fee
+            if not fee_coin and row.get("feeDetail") is not None:
+                parsed = _parse_json_like(row["feeDetail"])
+                if parsed is not None:
+                    _, detail_coin = _fee_detail_amount_and_coin(parsed)
+                    fee_coin = detail_coin
+            return fee, fee_coin
         if "feeDetail" not in row or row["feeDetail"] is None:
-            return 0.0
+            return 0.0, fee_coin
         parsed = _parse_json_like(row["feeDetail"])
         if parsed is None:
-            return 0.0
-        return _sum_fee_detail(parsed)
+            return 0.0, fee_coin
+        fee_detail = _fee_detail_amount_and_coin(parsed)
+        return fee_detail[0], fee_coin or fee_detail[1]
 
     def _log_fill_parse_warning(
         self,
@@ -1248,11 +1295,7 @@ class OMS:
         )
 
     def _spot_base_coin(self) -> str:
-        symbol = self._config.symbols.spot.symbol
-        for quote in ("USDT", "USDC", "USD", "BTC", "ETH"):
-            if symbol.endswith(quote) and len(symbol) > len(quote):
-                return symbol[: -len(quote)]
-        return symbol
+        return _base_coin_from_symbol(self._config.symbols.spot.symbol)
 
     def _spot_available_balance(self, base_coin: str) -> Optional[float]:
         store = getattr(self._gateway, "store", None)
@@ -1283,6 +1326,96 @@ class OMS:
             except Exception:
                 pass
         return self._spot_available_balance(base_coin)
+
+    async def reconcile_startup_spot_balance(
+        self,
+        *,
+        tolerance: float,
+        dry_run: bool,
+    ) -> bool:
+        base_coin = self._spot_base_coin()
+        actual = await self._get_spot_available_balance(base_coin)
+        internal = self._positions.spot_pos
+        perp_pos = self._positions.perp_pos
+        if actual is None:
+            self._orders_logger.log(
+                {
+                    "ts": time.time(),
+                    "event": "risk",
+                    "intent": "SYSTEM",
+                    "source": "oms",
+                    "mode": "INIT",
+                    "reason": "startup_spot_balance_unavailable",
+                    "leg": "spot",
+                    "internal_spot_pos": internal,
+                    "actual_spot_available": None,
+                    "diff": None,
+                    "tolerance": tolerance,
+                    "base_coin": base_coin,
+                    "perp_pos": perp_pos,
+                    "delta": internal + perp_pos,
+                    "dry_run": dry_run,
+                    "action_taken": "warn_only",
+                }
+            )
+            return True
+
+        diff = actual - internal
+        mismatch = abs(diff) > tolerance
+        open_spot_balance = abs(actual) > tolerance and abs(internal) <= tolerance
+        if not mismatch and not open_spot_balance:
+            self._orders_logger.log(
+                {
+                    "ts": time.time(),
+                    "event": "state",
+                    "intent": "SYSTEM",
+                    "source": "oms",
+                    "mode": "INIT",
+                    "reason": "startup_spot_balance_reconciled",
+                    "leg": "spot",
+                    "internal_spot_pos": internal,
+                    "actual_spot_available": actual,
+                    "diff": diff,
+                    "tolerance": tolerance,
+                    "base_coin": base_coin,
+                    "perp_pos": perp_pos,
+                    "delta": internal + perp_pos,
+                    "dry_run": dry_run,
+                    "action_taken": "none",
+                }
+            )
+            return True
+
+        reason = (
+            "startup_open_spot_balance_detected"
+            if open_spot_balance
+            else "startup_spot_balance_mismatch"
+        )
+        action_taken = "warn_only"
+        if not dry_run and self._risk is not None:
+            self._risk.halt(reason)
+            action_taken = "halted"
+        self._orders_logger.log(
+            {
+                "ts": time.time(),
+                "event": "risk",
+                "intent": "SYSTEM",
+                "source": "oms",
+                "mode": "INIT",
+                "reason": reason,
+                "leg": "spot",
+                "internal_spot_pos": internal,
+                "actual_spot_available": actual,
+                "diff": diff,
+                "tolerance": tolerance,
+                "base_coin": base_coin,
+                "perp_pos": perp_pos,
+                "delta": internal + perp_pos,
+                "dry_run": dry_run,
+                "action_taken": action_taken,
+            }
+        )
+        return action_taken != "halted"
 
     async def _precheck_spot_flatten_available(
         self,
@@ -1464,6 +1597,26 @@ def _parse_side(value: Optional[str]) -> Optional[Side]:
     return None
 
 
+def _spot_position_delta_after_fee(event: ExecutionEvent) -> float:
+    delta = event.size if event.side == Side.BUY else -event.size
+    if event.fee == 0 or not event.fee_coin:
+        return delta
+    base_coin = _base_coin_from_symbol(event.symbol)
+    if event.fee_coin.upper() != base_coin.upper():
+        return delta
+    fee_size = abs(event.fee)
+    if event.side == Side.BUY:
+        return event.size - fee_size
+    return -event.size - fee_size
+
+
+def _base_coin_from_symbol(symbol: str) -> str:
+    for quote in ("USDT", "USDC", "USD", "BTC", "ETH"):
+        if symbol.endswith(quote) and len(symbol) > len(quote):
+            return symbol[: -len(quote)]
+    return symbol
+
+
 def _first_string(row: dict, keys: list[str]) -> Optional[str]:
     for key in keys:
         if key in row and row[key]:
@@ -1498,11 +1651,22 @@ def _parse_json_like(value: object) -> object | None:
         return None
 
 
-def _sum_fee_detail(value: object) -> float:
+def _fee_detail_amount_and_coin(value: object) -> tuple[float, Optional[str]]:
     if isinstance(value, list):
-        return sum(_sum_fee_detail(item) for item in value)
+        total = 0.0
+        coin: Optional[str] = None
+        mixed = False
+        for item in value:
+            item_total, item_coin = _fee_detail_amount_and_coin(item)
+            total += item_total
+            if item_coin:
+                if coin is None:
+                    coin = item_coin
+                elif coin.upper() != item_coin.upper():
+                    mixed = True
+        return total, None if mixed else coin
     if not isinstance(value, dict):
-        return 0.0
+        return 0.0, None
     total = 0.0
     found = False
     for key in ("fee", "fillFee", "transactionFee", "totalFee"):
@@ -1511,13 +1675,20 @@ def _sum_fee_detail(value: object) -> float:
             continue
         total += fee
         found = True
+    coin = _first_string(
+        value,
+        ["feeCoin", "feeCurrency", "feeCcy", "feeCurrencyCode", "feeCoinName", "coin", "currency"],
+    )
     if found:
-        return total
+        return total, coin
     for nested_key in ("feeDetail", "details", "fees"):
         nested = value.get(nested_key)
         if nested is not None:
-            total += _sum_fee_detail(nested)
-    return total
+            nested_total, nested_coin = _fee_detail_amount_and_coin(nested)
+            total += nested_total
+            if coin is None:
+                coin = nested_coin
+    return total, coin
 
 
 def _available_balance_from_rows(rows: list[dict], base_coin: str) -> Optional[float]:

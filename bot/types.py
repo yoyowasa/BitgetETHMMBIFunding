@@ -86,3 +86,4 @@ class ExecutionEvent:
     size: float
     fee: float
     ts: float
+    fee_coin: Optional[str] = None

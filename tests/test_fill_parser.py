@@ -11,7 +11,7 @@ from bot.config import (
     SymbolsConfig,
 )
 from bot.oms.oms import OMS
-from bot.types import InstType
+from bot.types import ExecutionEvent, InstType, Side
 
 
 class CapturingLogger:
@@ -226,3 +226,122 @@ def test_parse_fill_reads_fee_detail() -> None:
 
     assert event is not None
     assert abs(event.fee - -0.00003) < 1e-12
+    assert event.fee_coin is None
+
+
+def test_parse_fill_reads_fee_coin_from_fee_detail() -> None:
+    oms, _ = _oms()
+    event = oms._parse_fill(
+        {
+            "instType": "SPOT",
+            "symbol": "ETHUSDT",
+            "side": "buy",
+            "orderId": "spot-fee-coin",
+            "tradeId": "spot-trade-fee-coin",
+            "priceAvg": "2315.42",
+            "size": "0.02",
+            "feeDetail": '[{"fee":"-0.00002","feeCoin":"ETH"}]',
+        }
+    )
+
+    assert event is not None
+    assert event.fee == -0.00002
+    assert event.fee_coin == "ETH"
+
+
+def test_spot_position_accounting_subtracts_base_fee_on_buy_and_keeps_sell_size() -> None:
+    oms, _ = _oms()
+
+    import asyncio
+
+    asyncio.run(
+        oms.ingest_fill(
+            ExecutionEvent(
+                inst_type=InstType.SPOT,
+                symbol="ETHUSDT",
+                order_id="buy-base-fee",
+                client_oid="HEDGE-buy-base-fee",
+                fill_id="fill-buy-base-fee",
+                side=Side.BUY,
+                price=2315.0,
+                size=0.06,
+                fee=-0.00006,
+                fee_coin="ETH",
+                ts=1.0,
+            )
+        )
+    )
+    assert abs(oms.positions.spot_pos - 0.05994) < 1e-12
+
+    asyncio.run(
+        oms.ingest_fill(
+            ExecutionEvent(
+                inst_type=InstType.SPOT,
+                symbol="ETHUSDT",
+                order_id="sell-quote-fee",
+                client_oid="FLATTEN-sell-quote-fee",
+                fill_id="fill-sell-quote-fee",
+                side=Side.SELL,
+                price=2315.0,
+                size=0.02,
+                fee=-0.1,
+                fee_coin="USDT",
+                ts=2.0,
+            )
+        )
+    )
+    assert abs(oms.positions.spot_pos - 0.03994) < 1e-12
+
+
+def test_spot_position_accounting_does_not_subtract_quote_fee_on_buy() -> None:
+    oms, _ = _oms()
+
+    import asyncio
+
+    asyncio.run(
+        oms.ingest_fill(
+            ExecutionEvent(
+                inst_type=InstType.SPOT,
+                symbol="ETHUSDT",
+                order_id="buy-quote-fee",
+                client_oid="HEDGE-buy-quote-fee",
+                fill_id="fill-buy-quote-fee",
+                side=Side.BUY,
+                price=2315.0,
+                size=0.06,
+                fee=-0.1,
+                fee_coin="USDT",
+                ts=1.0,
+            )
+        )
+    )
+
+    assert oms.positions.spot_pos == 0.06
+
+
+def test_spot_fee_coin_missing_logs_warning_and_keeps_size_accounting() -> None:
+    oms, logger = _oms()
+
+    import asyncio
+
+    event = oms._parse_fill(
+        {
+            "instType": "SPOT",
+            "symbol": "ETHUSDT",
+            "side": "buy",
+            "orderId": "buy-missing-fee-coin",
+            "clientOid": "HEDGE-buy-missing-fee-coin",
+            "tradeId": "fill-buy-missing-fee-coin",
+            "priceAvg": "2315.0",
+            "size": "0.06",
+            "fee": "-0.00006",
+            "ts": "1",
+        }
+    )
+    assert event is not None
+    asyncio.run(oms.ingest_fill(event))
+
+    assert oms.positions.spot_pos == 0.06
+    assert logger.records[-1]["reason"] == "fill_parse_warning"
+    assert logger.records[-1]["parse_reason"] == "spot_fee_coin_missing"
+    assert "fee" in logger.records[-1]["raw_keys"]

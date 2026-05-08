@@ -437,6 +437,10 @@ async def _run() -> None:
                         f"posMode mismatch: current={current} target={target_pos_mode}. "
                         f"Close all futures positions/orders for productType={config.symbols.perp.productType} and retry."
                     )
+            await oms.reconcile_startup_spot_balance(
+                tolerance=config.strategy.delta_tolerance,
+                dry_run=config.strategy.dry_run,
+            )
 
         try:
             await funding_cache.update_once()
