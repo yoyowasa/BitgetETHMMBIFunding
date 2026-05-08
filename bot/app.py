@@ -146,6 +146,58 @@ async def _cancel_all_on_startup(oms, logger) -> None:
         )
 
 
+async def _cancel_all_on_shutdown(oms, logger) -> bool:
+    # 役割: bounded run / signal 終了時に quote 残留を防ぐため、終了前に未約定注文をキャンセルする
+    reason = "shutdown_cancel_all"
+    if hasattr(logger, "warning"):
+        logger.warning("shutdown_cancel_all_start reason=%s", reason)
+    elif hasattr(logger, "log"):
+        logger.log(
+            {
+                "event": "shutdown_cancel_all_start",
+                "intent": "SYSTEM",
+                "source": "shutdown",
+                "mode": "SHUTDOWN",
+                "reason": "shutdown_cancel_all_start",
+                "leg": "orders",
+                "data": {"reason": reason},
+            }
+        )
+    try:
+        await oms.cancel_all(reason=reason)
+    except Exception as e:
+        if hasattr(logger, "exception"):
+            logger.exception("shutdown_cancel_all_failed reason=%s err=%s", reason, e)
+        elif hasattr(logger, "log"):
+            logger.log(
+                {
+                    "event": "shutdown_cancel_all_failed",
+                    "intent": "SYSTEM",
+                    "source": "shutdown",
+                    "mode": "SHUTDOWN",
+                    "reason": "shutdown_cancel_all_failed",
+                    "leg": "orders",
+                    "data": {"reason": reason, "error": repr(e)},
+                }
+            )
+        return False
+    if hasattr(logger, "warning"):
+        logger.warning("shutdown_cancel_all_done reason=%s", reason)
+    elif hasattr(logger, "log"):
+        logger.log(
+            {
+                "event": "shutdown_cancel_all_done",
+                "intent": "SYSTEM",
+                "source": "shutdown",
+                "mode": "SHUTDOWN",
+                "reason": "shutdown_cancel_all_done",
+                "leg": "orders",
+                "data": {"reason": reason},
+            }
+        )
+    return True
+
+
 def _sim_fill_sides(raw: str) -> list[Side]:
     mode = (raw or "").strip().lower()
     if mode == "buy":
@@ -522,11 +574,24 @@ async def _run() -> None:
         tasks.extend(ws_tasks)
         tasks.append(constraints_task)
 
-        await asyncio.gather(*tasks)
+        try:
+            await asyncio.gather(*tasks)
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            if private_enabled:
+                ok = await _cancel_all_on_shutdown(oms, system_logger)
+                if not ok:
+                    raise SystemExit(1)
 
 
 def main() -> None:
-    asyncio.run(_run())
+    try:
+        asyncio.run(_run())
+    except KeyboardInterrupt:
+        return
 
 
 if __name__ == "__main__":

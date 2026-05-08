@@ -1902,6 +1902,43 @@ ec1b00a  chore: bulk update after lint & format
 
 ---
 
+## 2026-05-08 live bounded shutdown cancel_all 修正
+
+### 観測事実
+- live bounded 90 秒実行 `runtime_logs\live_check_20260508_184108` で `order_new=64` / `order_cancel=62` となり、終了後に Futures quote が 1 件残留した。
+- 残留した注文は `ETHUSDT` Futures `QUOTE_ASK-281-40cde8a80a` / sell `0.02` / `2288.95`。
+- 対象注文は手動 cancel 済み。
+- Futures `+0.02 long` も手動決済済みとされ、その後 read-only API で Futures position `0.0`、Futures open orders `0`、SPOT open orders `0`、SPOT ETH available `0.000440000718` を確認。
+- 原因候補は `scripts/run_bot_for_duration.py` が timeout 時に Windows の `proc.terminate()` で bot を終了し、bot.app 側の shutdown cancel_all を待てていなかったこと。
+
+### 実装
+- `scripts/run_bot_for_duration.py`
+  - timeout 時の `terminate` 直行を廃止。
+  - Windows では `CREATE_NEW_PROCESS_GROUP` で子プロセスを起動し、timeout 時は `CTRL_BREAK_EVENT` で graceful shutdown を要求。
+  - POSIX では `SIGINT` で graceful shutdown を要求。
+  - 一定時間待っても終了しない場合のみ kill し、`bounded_graceful_shutdown_timeout` を出して exit code `1` にする。
+- `bot/app.py`
+  - shutdown helper `_cancel_all_on_shutdown` を追加。
+  - shutdown 時に task を cancel してから `oms.cancel_all(reason="shutdown_cancel_all")` を実行。
+  - `shutdown_cancel_all_start` / `shutdown_cancel_all_done` / `shutdown_cancel_all_failed` をログ出力。
+  - shutdown cancel_all 失敗時は `SystemExit(1)`。
+- `tests/test_graceful_shutdown.py`
+  - bounded runner が timeout 時に graceful shutdown を要求し、成功時は kill しないことを検証。
+  - graceful shutdown timeout 時のみ kill し、non-zero exit になることを検証。
+  - shutdown cancel_all 成功/失敗ログを検証。
+
+### 検証
+- `.venv\Scripts\python -m py_compile scripts\run_bot_for_duration.py bot\app.py tests\test_graceful_shutdown.py`: pass。
+- `.venv\Scripts\python -m pytest tests/test_graceful_shutdown.py -q`: 4 passed。
+- `.venv\Scripts\python -m pytest -q`: 76 passed。
+
+### 未確定点
+- live 再起動は未実施。
+- 今回修正後の live bounded 再実行は未実施。
+- 実ポジション決済、実注文、注文キャンセル、config 変更、quote churn 対策は未実施。
+
+---
+
 ## 2026-05-08 DRY_RUN=1 bounded 起動確認
 
 ### 観測事実
