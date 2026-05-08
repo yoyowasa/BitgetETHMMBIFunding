@@ -15,6 +15,11 @@ require_env() {
   fi
 }
 
+default_bot_cmd() {
+  # REAL_LOG_CMD 未設定でも標準の bot 起動コマンドで動けるようにする
+  echo "./.venv/Scripts/python.exe -m bot.app --config config.yaml"
+}
+
 write_meta() {
   # 実行のメタ情報をjsonに保存する（あとで追跡しやすくする）
   local meta_path="$1"
@@ -35,8 +40,11 @@ build_cmd() {
     echo "$*"
     return 0
   fi
-  require_env "REAL_LOG_CMD"
-  echo "${REAL_LOG_CMD}"
+  if [[ -n "${REAL_LOG_CMD:-}" ]]; then
+    echo "${REAL_LOG_CMD}"
+    return 0
+  fi
+  default_bot_cmd
 }
 
 LOG_DIR="${LOG_DIR:-${LOG_PATH:-logs}}" # LOG_DIR優先、LOG_PATHフォールバック、既定logs

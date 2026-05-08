@@ -12,6 +12,11 @@ function Require-Env([string]$name) {
   if ([string]::IsNullOrWhiteSpace($v)) { Die "env '$name' is required" }
 }
 
+function Get-DefaultBotCommand {
+  # 役割: REAL_LOG_CMD 未設定でも標準の bot 起動コマンドで動けるようにする
+  return ".\.venv\Scripts\python.exe -m bot.app --config config.yaml"
+}
+
 function Get-GitSha {
   # 役割: git sha を取得する（取得できなければ unknown）
   try {
@@ -65,9 +70,9 @@ if ($args.Count -gt 0) {
   # 役割: 引数があればそれをコマンドとして扱う
   $cmdString = ($args -join " ")
 } else {
-  # 役割: 引数が無ければ REAL_LOG_CMD を使う
-  Require-Env "REAL_LOG_CMD"
+  # 役割: 引数が無ければ REAL_LOG_CMD、未設定なら標準 bot 起動コマンドを使う
   $cmdString = [Environment]::GetEnvironmentVariable("REAL_LOG_CMD")
+  if ([string]::IsNullOrWhiteSpace($cmdString)) { $cmdString = Get-DefaultBotCommand }
 }
 
 Assert-SingleInstance $cmdString  # 役割: 実行前に多重起動をブロックする

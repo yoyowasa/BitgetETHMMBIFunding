@@ -1875,3 +1875,27 @@ ec1b00a  chore: bulk update after lint & format
 ### 未確定点
 - live 再起動は未実施のため、稼働中プロセスには未反映。
 - 実ポジション決済、config 変更、funding gate 変更、自動 flatten policy 追加、quote churn 対策は未実施。
+
+---
+
+## 2026-05-08 run_real_logs 既定起動コマンド追加
+
+### 観測事実
+- `scripts\run_real_logs.ps1` は引数も `REAL_LOG_CMD` も無い場合、`env 'REAL_LOG_CMD' is required` で停止していた。
+- 実稼働前の標準起動手順として wrapper を使う設計だが、毎回 `REAL_LOG_CMD` を手動設定する必要があり運用ミスの原因になっていた。
+
+### 実装
+- `scripts/run_real_logs.ps1`
+  - 引数なし、かつ `REAL_LOG_CMD` 未設定の場合、既定で `.\.venv\Scripts\python.exe -m bot.app --config config.yaml` を実行するように変更。
+  - `DRY_RUN=0` 時の `REAL_RUN_OK=1` 必須ガードは維持。
+- `scripts/run_real_logs.sh`
+  - 同様に `REAL_LOG_CMD` 未設定時の既定コマンドを追加。
+
+### 検証
+- `powershell -NoProfile -Command "\`$null = [scriptblock]::Create((Get-Content scripts/run_real_logs.ps1 -Raw)); 'ps1 syntax ok'"`: pass。
+- `.venv\Scripts\python -m pytest -q`: 72 passed。
+- `bash -n scripts/run_real_logs.sh`: Windows 環境に `bash` が無いため未実施。
+
+### 未確定点
+- live 再起動は未実施。
+- 実ポジション決済、注文キャンセル、config 変更は未実施。
