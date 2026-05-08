@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import signal
 import sys
 import time
 from pathlib import Path
@@ -20,6 +21,10 @@ from .oms.oms import OMS
 from .risk.guards import RiskGuards
 from .strategy.mm_funding import MMFundingStrategy
 from .types import ExecutionEvent, InstType, OrderIntent, Side
+
+
+class GracefulShutdown(Exception):
+    pass
 
 
 def _parse_args() -> argparse.Namespace:
@@ -196,6 +201,51 @@ async def _cancel_all_on_shutdown(oms, logger) -> bool:
             }
         )
     return True
+
+
+def _install_shutdown_signal_handlers(logger, shutdown_event: asyncio.Event) -> list[tuple[int, object]]:
+    # 役割: bounded runner の CTRL_BREAK/SIGINT を asyncio 側の graceful shutdown に変換する
+    loop = asyncio.get_running_loop()
+    installed: list[tuple[int, object]] = []
+
+    def _request_shutdown(signum, _frame) -> None:
+        if hasattr(logger, "log"):
+            logger.log(
+                {
+                    "event": "shutdown_signal",
+                    "intent": "SYSTEM",
+                    "source": "shutdown",
+                    "mode": "SHUTDOWN",
+                    "reason": "shutdown_signal",
+                    "leg": "process",
+                    "data": {"signal": signum},
+                }
+            )
+        loop.call_soon_threadsafe(shutdown_event.set)
+
+    for sig in (signal.SIGINT, getattr(signal, "SIGBREAK", None), signal.SIGTERM):
+        if sig is None:
+            continue
+        try:
+            previous = signal.getsignal(sig)
+            signal.signal(sig, _request_shutdown)
+            installed.append((sig, previous))
+        except (OSError, ValueError, RuntimeError):
+            continue
+    return installed
+
+
+def _restore_signal_handlers(installed: list[tuple[int, object]]) -> None:
+    for sig, previous in reversed(installed):
+        try:
+            signal.signal(sig, previous)
+        except (OSError, ValueError, RuntimeError):
+            continue
+
+
+async def _wait_for_shutdown_signal(shutdown_event: asyncio.Event) -> None:
+    await shutdown_event.wait()
+    raise GracefulShutdown
 
 
 def _sim_fill_sides(raw: str) -> list[Side]:
@@ -573,9 +623,23 @@ async def _run() -> None:
             )
         tasks.extend(ws_tasks)
         tasks.append(constraints_task)
+        shutdown_event = asyncio.Event()
+        signal_handlers = _install_shutdown_signal_handlers(system_logger, shutdown_event)
+        tasks.append(asyncio.create_task(_wait_for_shutdown_signal(shutdown_event)))
 
         try:
             await asyncio.gather(*tasks)
+        except GracefulShutdown:
+            system_logger.log(
+                {
+                    "event": "shutdown_requested",
+                    "intent": "SYSTEM",
+                    "source": "shutdown",
+                    "mode": "SHUTDOWN",
+                    "reason": "shutdown_signal",
+                    "leg": "process",
+                }
+            )
         finally:
             for task in tasks:
                 if not task.done():
@@ -585,6 +649,7 @@ async def _run() -> None:
                 ok = await _cancel_all_on_shutdown(oms, system_logger)
                 if not ok:
                     raise SystemExit(1)
+            _restore_signal_handlers(signal_handlers)
 
 
 def main() -> None:

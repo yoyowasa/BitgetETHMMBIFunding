@@ -1939,6 +1939,39 @@ ec1b00a  chore: bulk update after lint & format
 
 ---
 
+## 2026-05-08 DRY graceful bounded 再確認
+
+### 観測事実
+- 1 回目の DRY bounded run `runtime_logs\dry_graceful_check_20260508_231010` は `CTRL_BREAK_EVENT` 後に exit code `1` となり、`shutdown_cancel_all_start` / `shutdown_cancel_all_done` が出なかった。
+- 原因は Windows の `CTRL_BREAK_EVENT` が bot.app 内の asyncio shutdown path に変換されず、shutdown cancel_all の `finally` に到達していないこと。
+- 修正後の DRY bounded run `runtime_logs\dry_graceful_check_20260508_231255` は exit code `0`。
+- `startup_cancel_all_done=1`、`startup_cancel_all_failed=0`。
+- `startup_open_spot_balance_detected=0`、`HALTED=0`。
+- `shutdown_signal=1`、`shutdown_requested=1`。
+- `shutdown_cancel_all_start=1`、`shutdown_cancel_all_done=1`、`shutdown_cancel_all_failed=0`。
+- `book_rx_rate=1`、`msgs=1141` / `msgs_per_sec=19.014` / `avg_levels=53.529`。
+- `order_new=108`、すべて `state=dry_run`。
+- 最終 active dry-run quote 2 件は `reason=shutdown_cancel_all` で cancel 記録済み。
+
+### 実装
+- `bot/app.py`
+  - `SIGINT` / `SIGBREAK` / `SIGTERM` を `asyncio.Event` に変換する shutdown signal handler を追加。
+  - signal 受信時に `shutdown_signal` / `shutdown_requested` を出し、通常の shutdown cancel_all path に入るようにした。
+  - shutdown 後に signal handler を復元する処理を追加。
+
+### 検証
+- `.venv\Scripts\python -m py_compile bot\app.py scripts\run_bot_for_duration.py`: pass。
+- `.venv\Scripts\python -m pytest tests/test_graceful_shutdown.py -q`: 4 passed。
+- `.venv\Scripts\python -m pytest -q`: 76 passed。
+- `DRY_RUN=1` / `BOT_MODE=dry` / `scripts/run_bot_for_duration.py --duration-sec 90 --config config.yaml`: exit code `0`。
+
+### 未確定点
+- live 再起動は未実施。
+- live bounded 再確認は未実施。
+- 実ポジション決済、実注文、注文キャンセル、config 変更、quote churn 対策は未実施。
+
+---
+
 ## 2026-05-08 DRY_RUN=1 bounded 起動確認
 
 ### 観測事実
