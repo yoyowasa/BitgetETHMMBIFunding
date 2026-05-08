@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from decimal import Decimal, InvalidOperation
 import time
 import uuid
@@ -262,6 +263,16 @@ class OMS:
             side = Side.SELL if self._positions.spot_pos > 0 else Side.BUY
             size = abs(self._positions.spot_pos)
             price = spot_bbo.ask if side == Side.BUY else spot_bbo.bid
+            if side == Side.SELL:
+                base_coin = self._spot_base_coin()
+                spot_available = self._spot_available_balance(base_coin)
+                self._log_spot_flatten_available_precheck(
+                    cycle_id=cycle_id,
+                    spot_available=spot_available,
+                    sell_size=size,
+                    symbol=self._config.symbols.spot.symbol,
+                    base_coin=base_coin,
+                )
             await self._submit_order(
                 OrderRequest(
                     inst_type=InstType.SPOT,
@@ -450,6 +461,8 @@ class OMS:
             }
         )
         self._positions.apply_fill(event)
+        if self._pnl is not None:
+            self._pnl.record_fees(abs(event.fee))
         if intent == OrderIntent.HEDGE or ticket_id is not None:
             self._apply_hedge_fill(event, ticket_id)
             return
@@ -460,11 +473,7 @@ class OMS:
                 self._quote_fills += 1
                 if self._is_adverse_quote_fill(event):
                     self._adverse_fills += 1
-            if self._pnl is not None:
-                self._pnl.record_fees(abs(event.fee))
             await self._hedge_perp_fill(event)
-        elif event.inst_type == InstType.SPOT and self._pnl is not None:
-            self._pnl.record_fees(abs(event.fee))
 
     def _open_hedge_ticket(self, event: ExecutionEvent, hedge_side: Side, reason: str) -> HedgeTicket:
         now = time.time()
@@ -895,8 +904,12 @@ class OMS:
             if not ok:
                 if self._pnl is not None:
                     self._pnl.record_reject_streak(streak)
+                spot_available = None
+                if req.inst_type == InstType.SPOT and req.side == Side.SELL:
+                    spot_available = self._spot_available_balance(self._spot_base_coin())
                 self._orders_logger.log(
                     {
+                        "ts": time.time(),
                         "event": "risk",
                         "intent": req.intent.value,
                         "source": "oms",
@@ -905,7 +918,12 @@ class OMS:
                         "leg": None,
                         "cycle_id": req.cycle_id,
                         "resp_code": resp_code,
+                        "response_msg": response.get("msg"),
                         "reject_streak": streak,
+                        "inst_type": req.inst_type.value,
+                        "symbol": req.symbol,
+                        "side": req.side.value,
+                        "size": req.size,
                         "client_oid": req.client_oid,
                         "price": req.price,
                         "price_before_round": price_before_round,
@@ -913,6 +931,17 @@ class OMS:
                         "price_payload": price_payload,
                         "tick_size": price_tick if price_tick is not None else constraints.tick_size,
                         "pricePlace": price_place,
+                        "spot_pos_internal": self._positions.spot_pos,
+                        "perp_pos_internal": self._positions.perp_pos,
+                        "delta": self._positions.spot_pos + self._positions.perp_pos,
+                        "spot_available": spot_available,
+                        "reject_detail": (
+                            "spot_flatten_insufficient_balance"
+                            if str(resp_code) == "43012"
+                            and req.inst_type == InstType.SPOT
+                            and req.intent == OrderIntent.FLATTEN
+                            else None
+                        ),
                     }
                 )
         order_id = _extract_order_id(response)
@@ -1077,19 +1106,29 @@ class OMS:
         client_oid = _first_string(row, ["clientOid", "clientOrderId", "client_oid"]) or ""
         if not client_oid and order_id:
             client_oid = self._order_client_map.get(order_id, "")
-        price = _first_float(row, ["price", "fillPrice", "tradePrice"]) or 0.0
+        price = self._extract_fill_price(row, inst_type)
+        if price is None or price <= 0:
+            self._log_fill_parse_warning(
+                row,
+                parse_reason="fill_price_missing_or_invalid",
+                inst_type=inst_type,
+                order_id=order_id,
+                client_oid=client_oid,
+                price=price,
+            )
+            return None
         size = self._extract_fill_size(row, inst_type)
         if size is None or size <= 0:
             self._log_fill_parse_warning(
                 row,
-                reason="fill_size_missing_or_zero",
+                parse_reason="fill_size_missing_or_zero",
                 inst_type=inst_type,
                 order_id=order_id,
                 client_oid=client_oid,
                 size=size,
             )
             return None
-        fee = _first_float(row, ["fee", "fillFee"]) or 0.0
+        fee = self._extract_fill_fee(row)
         ts = _first_time(row, ["ts", "fillTime", "cTime", "tradeTime"]) or time.time()
         fill_id = _first_string(row, ["tradeId", "fillId", "execId", "id"])
         if not fill_id:
@@ -1107,6 +1146,27 @@ class OMS:
             ts=ts,
         )
 
+    def _extract_fill_price(self, row: dict, inst_type: InstType) -> Optional[float]:
+        if inst_type == InstType.SPOT:
+            keys = ["priceAvg", "fillPrice", "tradePrice", "price", "px"]
+        else:
+            keys = ["price", "fillPrice", "tradePrice", "priceAvg", "px"]
+        for key in keys:
+            if key not in row or row[key] is None:
+                continue
+            price = _safe_float(row[key])
+            if price is None:
+                self._log_fill_parse_warning(
+                    row,
+                    parse_reason="fill_price_parse_error",
+                    inst_type=inst_type,
+                    price_key=key,
+                    price_value=row[key],
+                )
+                continue
+            return price
+        return None
+
     def _extract_fill_size(self, row: dict, inst_type: InstType) -> Optional[float]:
         if inst_type == InstType.USDT_FUTURES:
             keys = ["baseVolume", "size", "fillSz", "tradeQty", "tradeSize"]
@@ -1119,7 +1179,7 @@ class OMS:
             if size is None:
                 self._log_fill_parse_warning(
                     row,
-                    reason="fill_size_parse_error",
+                    parse_reason="fill_size_parse_error",
                     inst_type=inst_type,
                     size_key=key,
                     size_value=row[key],
@@ -1128,14 +1188,28 @@ class OMS:
             return size
         return None
 
+    def _extract_fill_fee(self, row: dict) -> float:
+        fee = _first_float(row, ["fee", "fillFee", "transactionFee", "totalFee"])
+        if fee is not None:
+            return fee
+        if "feeDetail" not in row or row["feeDetail"] is None:
+            return 0.0
+        parsed = _parse_json_like(row["feeDetail"])
+        if parsed is None:
+            return 0.0
+        return _sum_fee_detail(parsed)
+
     def _log_fill_parse_warning(
         self,
         row: dict,
         *,
-        reason: str,
+        parse_reason: str,
         inst_type: InstType,
         order_id: str | None = None,
         client_oid: str | None = None,
+        price: float | None = None,
+        price_key: str | None = None,
+        price_value: object | None = None,
         size: float | None = None,
         size_key: str | None = None,
         size_value: object | None = None,
@@ -1147,14 +1221,20 @@ class OMS:
                 "intent": "SYSTEM",
                 "source": "oms",
                 "mode": "RUN",
-                "reason": reason,
+                "reason": "fill_parse_warning",
+                "parse_reason": parse_reason,
                 "leg": "fill",
                 "inst_type": inst_type.value,
                 "symbol": row.get("instId") or row.get("symbol"),
                 "order_id": order_id or _first_string(row, ["orderId", "order_id", "ordId"]),
                 "client_oid": client_oid
                 or _first_string(row, ["clientOid", "clientOrderId", "client_oid"]),
+                "trade_id": _first_string(row, ["tradeId", "fillId", "execId", "id"]),
                 "fill_id": _first_string(row, ["tradeId", "fillId", "execId", "id"]),
+                "raw_keys": sorted(str(key) for key in row.keys()),
+                "price": price,
+                "price_key": price_key,
+                "price_value": None if price_value is None else str(price_value),
                 "size": size,
                 "size_key": size_key,
                 "size_value": None if size_value is None else str(size_value),
@@ -1163,6 +1243,67 @@ class OMS:
                     for key in ("baseVolume", "size", "fillSz", "tradeQty", "tradeSize")
                     if key in row
                 },
+            }
+        )
+
+    def _spot_base_coin(self) -> str:
+        symbol = self._config.symbols.spot.symbol
+        for quote in ("USDT", "USDC", "USD", "BTC", "ETH"):
+            if symbol.endswith(quote) and len(symbol) > len(quote):
+                return symbol[: -len(quote)]
+        return symbol
+
+    def _spot_available_balance(self, base_coin: str) -> Optional[float]:
+        store = getattr(self._gateway, "store", None)
+        if store is None:
+            return None
+        for store_name in ("account", "accounts", "asset", "assets", "balance", "balances"):
+            balance_store = getattr(store, store_name, None)
+            if balance_store is None or not hasattr(balance_store, "find"):
+                continue
+            try:
+                rows = list(balance_store.find())
+            except Exception:
+                continue
+            available = _available_balance_from_rows(rows, base_coin)
+            if available is not None:
+                return available
+        return None
+
+    def _log_spot_flatten_available_precheck(
+        self,
+        *,
+        cycle_id: int,
+        spot_available: Optional[float],
+        sell_size: float,
+        symbol: str,
+        base_coin: str,
+    ) -> None:
+        insufficient = spot_available is not None and spot_available + 1e-12 < sell_size
+        if spot_available is None:
+            reason = "spot_flatten_available_precheck_unavailable"
+        elif insufficient:
+            reason = "spot_flatten_insufficient_available_precheck"
+        else:
+            reason = "spot_flatten_available_precheck"
+        self._orders_logger.log(
+            {
+                "ts": time.time(),
+                "event": "risk",
+                "intent": OrderIntent.FLATTEN.value,
+                "source": "oms",
+                "mode": "RUN",
+                "reason": reason,
+                "leg": "spot",
+                "cycle_id": cycle_id,
+                "spot_pos_internal": self._positions.spot_pos,
+                "perp_pos_internal": self._positions.perp_pos,
+                "delta": self._positions.spot_pos + self._positions.perp_pos,
+                "spot_available": spot_available,
+                "sell_size": sell_size,
+                "symbol": symbol,
+                "base_coin": base_coin,
+                "action": "warn_only",
             }
         )
 
@@ -1249,6 +1390,60 @@ def _safe_float(value: object) -> Optional[float]:
         return float(Decimal(str(value)))
     except (InvalidOperation, TypeError, ValueError):
         return None
+
+
+def _parse_json_like(value: object) -> object | None:
+    if isinstance(value, (dict, list)):
+        return value
+    if not isinstance(value, str):
+        return None
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return None
+
+
+def _sum_fee_detail(value: object) -> float:
+    if isinstance(value, list):
+        return sum(_sum_fee_detail(item) for item in value)
+    if not isinstance(value, dict):
+        return 0.0
+    total = 0.0
+    found = False
+    for key in ("fee", "fillFee", "transactionFee", "totalFee"):
+        fee = _safe_float(value.get(key))
+        if fee is None:
+            continue
+        total += fee
+        found = True
+    if found:
+        return total
+    for nested_key in ("feeDetail", "details", "fees"):
+        nested = value.get(nested_key)
+        if nested is not None:
+            total += _sum_fee_detail(nested)
+    return total
+
+
+def _available_balance_from_rows(rows: list[dict], base_coin: str) -> Optional[float]:
+    base_coin_upper = base_coin.upper()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        coin = _first_string(row, ["coin", "coinName", "currency", "asset", "baseCoin"])
+        if coin is not None and coin.upper() != base_coin_upper:
+            continue
+        if coin is None:
+            symbol = _first_string(row, ["symbol", "instId"])
+            if symbol is not None and base_coin_upper not in symbol.upper():
+                continue
+        available = _first_float(
+            row,
+            ["available", "availableBalance", "availableAmount", "free", "normalBalance"],
+        )
+        if available is not None:
+            return available
+    return None
 
 
 def _first_time(row: dict, keys: list[str]) -> Optional[float]:

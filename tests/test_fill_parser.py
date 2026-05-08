@@ -100,6 +100,7 @@ def test_parse_futures_fill_uses_base_volume() -> None:
     assert event is not None
     assert event.inst_type == InstType.USDT_FUTURES
     assert event.size == 0.02
+    assert event.fee == 0.001
     assert logger.records == []
 
 
@@ -137,5 +138,91 @@ def test_parse_fill_rejects_zero_size_with_warning() -> None:
     )
 
     assert event is None
-    assert logger.records[-1]["reason"] == "fill_size_missing_or_zero"
+    assert logger.records[-1]["reason"] == "fill_parse_warning"
+    assert logger.records[-1]["parse_reason"] == "fill_size_missing_or_zero"
     assert logger.records[-1]["size"] == 0.0
+
+
+def test_parse_spot_fill_uses_price_avg() -> None:
+    oms, logger = _oms()
+    event = oms._parse_fill(
+        {
+            "instType": "SPOT",
+            "symbol": "ETHUSDT",
+            "side": "buy",
+            "orderId": "spot-price-avg",
+            "clientOid": "HEDGE-1",
+            "tradeId": "spot-trade-avg",
+            "priceAvg": "2315.42",
+            "size": "0.02",
+        }
+    )
+
+    assert event is not None
+    assert event.inst_type == InstType.SPOT
+    assert event.price == 2315.42
+    assert event.size == 0.02
+    assert logger.records == []
+
+
+def test_parse_spot_fill_price_fallbacks() -> None:
+    for key in ("fillPrice", "tradePrice", "price", "px"):
+        oms, _ = _oms()
+        event = oms._parse_fill(
+            {
+                "instType": "SPOT",
+                "symbol": "ETHUSDT",
+                "side": "sell",
+                "orderId": f"spot-{key}",
+                "tradeId": f"spot-trade-{key}",
+                key: "2316.12",
+                "size": "0.01",
+            }
+        )
+
+        assert event is not None
+        assert event.price == 2316.12
+
+
+def test_parse_spot_fill_rejects_missing_price_with_warning() -> None:
+    oms, logger = _oms()
+    event = oms._parse_fill(
+        {
+            "instType": "SPOT",
+            "symbol": "ETHUSDT",
+            "side": "buy",
+            "orderId": "spot-no-price",
+            "clientOid": "HEDGE-no-price",
+            "tradeId": "spot-trade-no-price",
+            "size": "0.02",
+        }
+    )
+
+    assert event is None
+    warning = logger.records[-1]
+    assert warning["reason"] == "fill_parse_warning"
+    assert warning["parse_reason"] == "fill_price_missing_or_invalid"
+    assert warning["inst_type"] == "SPOT"
+    assert warning["order_id"] == "spot-no-price"
+    assert warning["trade_id"] == "spot-trade-no-price"
+    assert warning["client_oid"] == "HEDGE-no-price"
+    assert "size" in warning["raw_keys"]
+
+
+def test_parse_fill_reads_fee_detail() -> None:
+    oms, _ = _oms()
+    event = oms._parse_fill(
+        {
+            "instType": "SPOT",
+            "symbol": "ETHUSDT",
+            "side": "buy",
+            "orderId": "spot-fee",
+            "tradeId": "spot-trade-fee",
+            "priceAvg": "2315.42",
+            "size": "0.02",
+            "feeDetail": '[{"fee":"-0.00001"},{"totalFee":"-0.00002"}]',
+        }
+    )
+
+    assert event is not None
+    assert abs(event.fee - -0.00003) < 1e-12

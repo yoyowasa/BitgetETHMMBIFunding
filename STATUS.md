@@ -1756,3 +1756,47 @@ ec1b00a  chore: bulk update after lint & format
 
 ### 未確定点
 - live 再起動、config 変更、実ポジション決済は未実施。
+
+---
+
+## 2026-05-08 SPOT fill price/fee parser と 43012 診断ログ修正
+
+### 観測事実
+- `logs/fills.jsonl` 上、内部 `spot_pos=0.04` は SPOT buy fill 3 件合計 `0.06` と SPOT flatten sell fill 2 件合計 `0.02` の差分。
+  - `HEDGE-1778083943485-bef13a738b` buy `0.02`
+  - `HEDGE-1778116032566-63a1dc51a1` buy `0.02`
+  - `FLATTEN-284410-acf781b9d5` sell `0.0153` + `0.0047`
+  - `HEDGE-1778116030928-d738caf32b` buy `0.02`
+- 2026-05-07 11:15 JST 付近の SPOT flatten sell は `resp_code=43012` で reject。Bitget Spot REST error code 上は Insufficient balance として扱う。
+- 現行 private WS subscription は `orders` / `fill` / futures `positions` のみで、SPOT balance sync は無い。
+- 既存 `OMS._parse_fill()` は SPOT fill price 欠落時も `price=0.0` の正常 fill として扱っていた。
+- `fills.jsonl` の futures / spot fee は全件 `0.0`。既存 parser は `feeDetail` を読まず、PnL 側も HEDGE / FLATTEN / UNWIND fill の fee 計上前に return していた。
+
+### 推論
+- 43012 は内部 `spot_pos` と実口座 available ETH の不一致、または遅延/別 tradeId の SPOT fill 反映順により、内部が売却可能残高を過大評価した可能性が高い。
+- `price=0.0` の SPOT fill は hedge slip / gross spread / PnL 評価を壊す穴だった。
+- SPOT fill dedupe は `SPOT:tradeId` で機能するが、同じ clientOid でも異なる tradeId の遅延 fill は重複扱いにならない。
+
+### 実装
+- `bot/oms/oms.py`
+  - `_extract_fill_price()` を追加し、SPOT は `priceAvg` / `fillPrice` / `tradePrice` / `price` / `px` を候補順に抽出。
+  - price 欠落または `price <= 0` の fill は正常 fill として扱わず、`risk` / `reason=fill_parse_warning` / `parse_reason=fill_price_missing_or_invalid` を出す。
+  - warning に `inst_type`、raw keys、`order_id`、`trade_id`、`client_oid` を含める。
+  - `_extract_fill_fee()` を追加し、`fee` / `fillFee` / `transactionFee` / `totalFee` と JSON 文字列または list/dict の `feeDetail` を抽出。
+  - PnL fee 計上を全 fill 共通に移動し、HEDGE / FLATTEN / UNWIND でも `fees_paid` に反映されるように変更。
+  - SPOT sell flatten 前に store から available base coin を read-only で探す precheck warning を追加。現状は balance store が無い場合 `spot_flatten_available_precheck_unavailable` で `action=warn_only`。
+  - order reject risk log に `inst_type` / `symbol` / `side` / `size` / `response_msg` / `spot_pos_internal` / `perp_pos_internal` / `delta` / `spot_available` を追加。SPOT FLATTEN の `43012` は `reject_detail=spot_flatten_insufficient_balance`。
+- `tests/test_fill_parser.py`
+  - SPOT `priceAvg`、`fillPrice`、`tradePrice`、`price`、`px` の price 抽出テストを追加。
+  - price 欠落 fill が reject され warning log を出すテストを追加。
+  - `feeDetail` 抽出テストを追加。
+  - 既存 futures `baseVolume` テストは維持。
+
+### 検証
+- `.venv\Scripts\python -m py_compile bot\oms\oms.py tests\test_fill_parser.py`: pass。
+- `.venv\Scripts\python -m pytest tests/test_fill_parser.py -q`: 7 passed。
+- `.venv\Scripts\python -m pytest -q`: 61 passed。
+
+### 未確定点
+- SPOT available ETH を実際に同期する経路は未実装。次段では private balance channel または read-only REST `get_spot_available_balance(base_coin)` を追加し、`available < sell_size` の場合は `order_new` を出さず `order_skip` / `risk` にする案が必要。
+- 稼働中 live process への反映は未実施。live 再起動、config 変更、実ポジション決済は未実施。
