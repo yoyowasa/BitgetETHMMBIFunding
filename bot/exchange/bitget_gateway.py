@@ -13,7 +13,12 @@ from ..log.jsonl import JsonlLogger
 from ..marketdata import book as book_md
 from ..marketdata.tfi import TFIAccumulator
 from ..types import InstType, OrderRequest
-from .constraints import ConstraintsRegistry, InstrumentConstraints
+from .constraints import (
+    ConstraintsRegistry,
+    InstrumentConstraints,
+    format_price_for_bitget,
+    quantize_perp_price,
+)
 
 
 class BitgetGateway:
@@ -299,6 +304,10 @@ class BitgetGateway:
             return await self.rest_post("/api/v2/spot/trade/place-order", data)
 
         if req.inst_type == InstType.USDT_FUTURES:
+            constraints = self.constraints.get(InstType.USDT_FUTURES)
+            rounded_price = None
+            if req.price is not None and constraints is not None and constraints.is_ready():
+                rounded_price = quantize_perp_price(req.price, req.side, constraints)
             data = {
                 "symbol": req.symbol,
                 "productType": self.config.symbols.perp.productType,
@@ -309,7 +318,9 @@ class BitgetGateway:
                 "size": str(req.size),
                 "clientOid": req.client_oid,
             }
-            if req.price is not None:
+            if rounded_price is not None:
+                data["price"] = format_price_for_bitget(rounded_price)
+            elif req.price is not None:
                 data["price"] = str(req.price)
             if req.force is not None:
                 data["timeInForceValue"] = req.force.value
@@ -611,6 +622,7 @@ def _parse_spot_constraints(row: dict) -> InstrumentConstraints:
         qty_step=qty_step,
         min_notional=min_notional or 0.0,
         tick_size=tick_size,
+        price_place=price_scale,
     )
 
 
@@ -628,6 +640,7 @@ def _parse_perp_constraints(row: dict) -> InstrumentConstraints:
         qty_step=qty_step or 0.0,
         min_notional=min_notional or 0.0,
         tick_size=tick_size,
+        price_place=price_scale,
     )
 
 

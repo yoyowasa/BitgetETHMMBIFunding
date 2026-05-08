@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -300,6 +301,26 @@ async def _pnl_flush_loop(
         pnl_aggregator.flush()
 
 
+async def _runtime_heartbeat(logger, *, interval_sec: float = 60.0) -> None:
+    while True:
+        await asyncio.sleep(interval_sec)
+        logger.log(
+            {
+                "event": "runtime_heartbeat",
+                "intent": "SYSTEM",
+                "source": "runtime",
+                "mode": "RUN",
+                "reason": "runtime_heartbeat",
+                "leg": "process",
+                "data": {
+                    "pid": os.getpid(),
+                    "ppid": os.getppid() if hasattr(os, "getppid") else None,
+                    "python": sys.executable,
+                },
+            }
+        )
+
+
 async def _run() -> None:
     args = _parse_args()
     load_dotenv()
@@ -474,6 +495,7 @@ async def _run() -> None:
             ),
             asyncio.create_task(monitor_disconnect()),
             loop_lag_task,
+            asyncio.create_task(_runtime_heartbeat(system_logger)),
         ]
         if private_enabled:
             tasks.append(asyncio.create_task(oms.monitor_fills()))

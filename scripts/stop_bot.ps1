@@ -30,10 +30,9 @@ if (-not $proc) {
     exit 0
 }
 
-Write-Host "[stop_bot] sending CTRL_C_EVENT to pid=$pidVal"
+Write-Host "[stop_bot] stopping pid=$pidVal"
 
-# Windows の Ctrl-C 送信は AttachConsole が必要。簡易策: taskkill /T (子プロセス含む)
-# graceful: /T のみ (SIGTERM 相当に近い)
+# Windows の Ctrl-C 送信は AttachConsole が必要。ここでは子プロセス含めて停止要求を送る。
 $null = & taskkill /PID $pidVal /T 2>&1
 
 # 待機

@@ -7,7 +7,8 @@
 param(
     [string]$Config = "config.yaml",
     [int]$RestartDelaySec = 30,
-    [string]$PythonExe = ".\.venv\Scripts\python.exe"
+    [string]$PythonExe = ".\.venv\Scripts\python.exe",
+    [string]$LogDir = "logs"
 )
 
 $ErrorActionPreference = "Stop"
@@ -24,30 +25,51 @@ if (-not (Test-Path $Config)) {
     exit 1
 }
 
+function Test-BotProcess {
+    param([string]$PidValue)
+    if (-not $PidValue) { return $false }
+    $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$PidValue" -ErrorAction SilentlyContinue
+    if (-not $proc) { return $false }
+    return ($proc.CommandLine -like "*$root*" -and $proc.CommandLine -like "*-m bot.app*")
+}
+
+if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir | Out-Null }
+
 # PID ファイル（重複起動防止）
-$pidFile = Join-Path $root "logs\bot.pid"
+$pidFile = Join-Path $root "$LogDir\bot.pid"
 if (Test-Path $pidFile) {
     $oldPid = Get-Content $pidFile -ErrorAction SilentlyContinue
-    if ($oldPid -and (Get-Process -Id $oldPid -ErrorAction SilentlyContinue)) {
+    if ($oldPid -and (Test-BotProcess -PidValue $oldPid)) {
         Write-Error "bot already running (pid=$oldPid). stop first via scripts/stop_bot.ps1"
         exit 1
     }
     Remove-Item $pidFile -Force
 }
 
-if (-not (Test-Path "logs")) { New-Item -ItemType Directory -Path "logs" | Out-Null }
-
 Write-Host "[start_bot] root=$root config=$Config restart_delay=${RestartDelaySec}s"
 
 while ($true) {
     $startTime = Get-Date
+    $runId = $startTime.ToString("yyyyMMdd-HHmmss")
+    $stdoutLog = Join-Path $LogDir "bot.$runId.stdout.log"
+    $stderrLog = Join-Path $LogDir "bot.$runId.stderr.log"
+    $runInfo = Join-Path $LogDir "bot.run.json"
     Write-Host "[start_bot] launching bot.app at $startTime"
 
     $proc = Start-Process -FilePath $PythonExe `
         -ArgumentList "-m","bot.app","--config",$Config `
-        -PassThru -NoNewWindow -RedirectStandardOutput "logs\bot.stdout.log" -RedirectStandardError "logs\bot.stderr.log"
+        -PassThru -NoNewWindow -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog
 
     Set-Content -Path $pidFile -Value $proc.Id
+    @{
+        pid = $proc.Id
+        run_id = $runId
+        started_at = $startTime.ToString("o")
+        config = $Config
+        stdout = $stdoutLog
+        stderr = $stderrLog
+        command = "$PythonExe -m bot.app --config $Config"
+    } | ConvertTo-Json | Set-Content -Path $runInfo -Encoding UTF8
     Write-Host "[start_bot] pid=$($proc.Id) started"
 
     Wait-Process -Id $proc.Id
