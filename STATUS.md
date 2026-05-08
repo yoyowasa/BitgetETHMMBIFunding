@@ -1899,3 +1899,43 @@ ec1b00a  chore: bulk update after lint & format
 ### 未確定点
 - live 再起動は未実施。
 - 実ポジション決済、注文キャンセル、config 変更は未実施。
+
+---
+
+## 2026-05-08 DRY_RUN=1 bounded 起動確認
+
+### 観測事実
+- `RUN_ID=dry_check_20260508_183141` / `LOG_DIR=runtime_logs\dry_check_20260508_183141` で 90 秒 bounded run を実施。
+- startup flags は `env_DRY_RUN=1`、`dry_run=true`、`private_enabled=true`。
+- `startup_cancel_all_done` は 1 件。
+- `startup_cancel_all_failed` は 0 件。
+- `constraints_loaded` は `spot_ready=true` / `perp_ready=true`。
+- `startup_open_spot_balance_detected` は 0 件。HALTED も 0 件。
+- `book_rx_rate` は 1 件、`msgs=1090` / `msgs_per_sec=18.151` / `avg_levels=27.305`。
+- dry_run quote order_new は 48 件、QUOTING tick は 319 件。
+
+### 検証
+- `scripts/run_real_logs.ps1` 経由の bounded DRY_RUN=1 起動が完了し、`scripts/run_bot_for_duration.py` により 90 秒で自動停止。
+
+### 未確定点
+- live 再起動は未実施。
+- 実ポジション決済、実注文、注文キャンセル、config 変更は未実施。
+
+---
+
+## 2026-05-08 run_real_logs 多重起動 self-match 修正
+
+### 観測事実
+- `REAL_LOG_CMD` を設定して `scripts\run_real_logs.ps1` を呼ぶと、`Assert-SingleInstance` が呼び出し元 PowerShell の command line に含まれる同一文字列を拾い、`already running` と誤判定した。
+
+### 実装
+- `scripts/run_real_logs.ps1`
+  - 多重起動判定から現在プロセスと親プロセスを除外。
+  - 別プロセスで同一 command が走っている場合だけ拒否する。
+
+### 検証
+- DRY_RUN=1 bounded run で確認予定。
+
+### 未確定点
+- live 再起動は未実施。
+- 実ポジション決済、注文キャンセル、config 変更は未実施。

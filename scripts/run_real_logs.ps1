@@ -36,9 +36,20 @@ function Write-Meta([string]$path, [hashtable]$obj) {
 function Assert-SingleInstance([string]$cmd) {
   # 役割: 同一コマンドの多重起動を検出したら起動を拒否して終了する（誤爆防止）
   $pattern = [Regex]::Escape($cmd)
+  $selfPid = $PID
+  $parentPid = $null
+  try {
+    $selfProc = Get-CimInstance Win32_Process -Filter "ProcessId = $selfPid"
+    $parentPid = $selfProc.ParentProcessId
+  } catch {
+  }
   $procs = @(
     Get-CimInstance Win32_Process |
-      Where-Object { $_.CommandLine -match $pattern } |
+      Where-Object {
+        $_.CommandLine -match $pattern -and
+        $_.ProcessId -ne $selfPid -and
+        ($null -eq $parentPid -or $_.ProcessId -ne $parentPid)
+      } |
       Select-Object -ExpandProperty ProcessId
   )
   if ($procs.Count -gt 0) { Die "already running: $cmd (pids=$($procs -join ','))" }
