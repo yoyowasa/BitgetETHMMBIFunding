@@ -50,7 +50,7 @@ strategy:
   one_sided_quote_policy: current
   tfi_fade_threshold: 0.6
   tfi_fade_policy: disabled
-  reprice_threshold_bps: 1.0
+  reprice_threshold_bps: 2.5
   adverse_fill_horizon_sec: 2.0
   adverse_buffer_bps: 2.0
   k_tfi_bps: 1.0
@@ -58,7 +58,7 @@ strategy:
   target_inventory_max_ratio: 1.0
   funding_window_sec: 300.0
   min_half_spread_bps: 14.0
-  quote_refresh_ms: 250
+  quote_refresh_ms: 500
   dry_run: false
 
 hedge:

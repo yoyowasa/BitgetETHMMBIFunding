@@ -2044,3 +2044,26 @@ ec1b00a  chore: bulk update after lint & format
 ### 未確定点
 - 修正後の live bounded 再確認は未実施。
 - live 起動、実ポジション操作、注文キャンセル、config.yaml 変更は未実施。
+
+---
+
+## 2026-05-09 live config churn 低減反映
+
+### 観測事実
+- `config.churn_test.yaml` で DRY / live bounded 検証を行い、旧設定より order churn が低下した。
+- race 修正後の `runtime_logs\live_30min_after_hedge_race_fix_20260509_023451` は `HALTED=0` / `order_reject=0` / `shutdown_cancel_all_done=1` / `fill_parse_warning=0`。
+- 同 30 分 run で PERP fill と SPOT hedge fill が出たが、`unhedged_exceeded_deferred_for_hedge_ticket` により flatten は defer され、`hedge_chase=0` / `FLATTEN order_new=0`。
+- 実口座は手動で Futures short と SPOT long を解消し、Futures flat / SPOT dust の状態まで確認済み。
+
+### 実装
+- `config.yaml`
+  - `strategy.reprice_threshold_bps: 1.0` から `2.5` へ変更。
+  - `strategy.quote_refresh_ms: 250` から `500` へ変更。
+
+### 検証
+- `git diff -- config.yaml`: 上記 2 項目のみ差分。
+- `.venv\Scripts\python -m pytest -q`: 79 passed。
+
+### 未確定点
+- 常駐起動は未実施。
+- config 反映後の live 常駐確認は未実施。
