@@ -57,6 +57,15 @@ class HedgeTicket:
         return max(0.0, self.want_qty - self.filled_qty)
 
 
+@dataclass(frozen=True)
+class HedgeTicketSnapshot:
+    ticket_id: str
+    remain: float
+    deadline_ts: float
+    tries: int
+    expired: bool
+
+
 class LRUSet:
     def __init__(self, maxlen: int = 10000):
         self._maxlen = maxlen
@@ -178,6 +187,31 @@ class OMS:
                 latest = ticket
         return None if latest is None else latest.ticket_id
 
+    def has_open_hedge_ticket(self) -> bool:
+        return self.open_hedge_ticket_snapshot() is not None
+
+    def open_hedge_ticket_snapshot(self, now: float | None = None) -> HedgeTicketSnapshot | None:
+        latest: Optional[HedgeTicket] = None
+        for ticket in self._hedge_tickets.values():
+            if ticket.status != "OPEN" or ticket.remain <= 1e-9:
+                continue
+            if latest is None or ticket.created_ts > latest.created_ts:
+                latest = ticket
+        if latest is None:
+            return None
+        ts = time.time() if now is None else now
+        return HedgeTicketSnapshot(
+            ticket_id=latest.ticket_id,
+            remain=latest.remain,
+            deadline_ts=latest.deadline_ts,
+            tries=latest.tries,
+            expired=ts >= latest.deadline_ts,
+        )
+
+    def should_defer_flatten_for_hedge_ticket(self, now: float | None = None) -> bool:
+        snapshot = self.open_hedge_ticket_snapshot(now=now)
+        return snapshot is not None and not snapshot.expired
+
     def drain_quote_metrics(self) -> QuoteMetrics:
         metrics = QuoteMetrics(
             quote_orders=self._quote_orders,
@@ -238,6 +272,7 @@ class OMS:
 
     async def flatten(self, spot_bbo: Optional[book_md.BBO], cycle_id: int, reason: str) -> None:
         async with self._get_symbol_lock(self._config.symbols.perp.symbol):
+            self.fail_open_tickets("flatten_started")
             await self._cancel_all_quotes_unlocked(reason=reason)
             if not self._gateway.constraints.ready():
                 return

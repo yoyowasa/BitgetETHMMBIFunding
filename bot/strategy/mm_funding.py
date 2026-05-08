@@ -589,6 +589,43 @@ class MMFundingStrategy:
 
         unhedged_notional = abs(self._oms.unhedged_qty) * mid_spot
         if self._risk.unhedged_exceeded(unhedged_notional, self._oms.unhedged_since):
+            hedge_ticket = self._oms.open_hedge_ticket_snapshot(now=now)
+            if self._oms.should_defer_flatten_for_hedge_ticket(now=now):
+                self._state = StrategyState.HEDGING
+                await self._oms.cancel_all(reason="unhedged_exceeded_deferred_for_hedge_ticket")
+                self._log_unhedged_exceeded(
+                    now=now,
+                    unhedged_notional=unhedged_notional,
+                    hedge_ticket=hedge_ticket,
+                    action_taken="defer_flatten_cancel_quotes",
+                    reason="unhedged_exceeded_deferred_for_hedge_ticket",
+                    spot_pos=spot_pos,
+                    perp_pos=perp_pos,
+                    delta=delta,
+                )
+                self._log_decision(
+                    now,
+                    spot_bbo,
+                    perp_bbo,
+                    funding.funding_rate,
+                    basis,
+                    obi_spot,
+                    obi_perp,
+                    target_q,
+                    "unhedged_exceeded_deferred_for_hedge_ticket",
+                    tfi,
+                )
+                return
+            self._log_unhedged_exceeded(
+                now=now,
+                unhedged_notional=unhedged_notional,
+                hedge_ticket=hedge_ticket,
+                action_taken="flatten",
+                reason="unhedged_exceeded",
+                spot_pos=spot_pos,
+                perp_pos=perp_pos,
+                delta=delta,
+            )
             self._state = StrategyState.FLATTENING
             await self._oms.flatten(spot_bbo, self._cycle_id, reason="unhedged_exceeded")
             self._log_decision(
@@ -865,6 +902,43 @@ class MMFundingStrategy:
             target_q,
             action,
             tfi,
+        )
+
+    def _log_unhedged_exceeded(
+        self,
+        *,
+        now: float,
+        unhedged_notional: float,
+        hedge_ticket,
+        action_taken: str,
+        reason: str,
+        spot_pos: float,
+        perp_pos: float,
+        delta: float,
+    ) -> None:
+        self._decision_logger.log(
+            {
+                "ts": now,
+                "event": "risk",
+                "intent": "RISK",
+                "source": "strategy",
+                "mode": self._state.value,
+                "reason": reason,
+                "leg": "both",
+                "cycle_id": self._cycle_id,
+                "unhedged_qty": self._oms.unhedged_qty,
+                "unhedged_notional": unhedged_notional,
+                "unhedged_since": self._oms.unhedged_since,
+                "has_open_hedge_ticket": hedge_ticket is not None,
+                "hedge_ticket_id": None if hedge_ticket is None else hedge_ticket.ticket_id,
+                "hedge_ticket_remain": None if hedge_ticket is None else hedge_ticket.remain,
+                "hedge_ticket_deadline_ts": None if hedge_ticket is None else hedge_ticket.deadline_ts,
+                "hedge_ticket_tries": None if hedge_ticket is None else hedge_ticket.tries,
+                "action_taken": action_taken,
+                "spot_pos": spot_pos,
+                "perp_pos": perp_pos,
+                "delta": delta,
+            }
         )
 
     def check_open_delta_while_stopped(

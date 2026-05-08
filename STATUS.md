@@ -2009,3 +2009,38 @@ ec1b00a  chore: bulk update after lint & format
 ### 未確定点
 - live 再起動は未実施。
 - 実ポジション決済、注文キャンセル、config 変更は未実施。
+
+---
+
+## 2026-05-09 hedge ticket / flatten race 修正
+
+### 観測事実
+- `runtime_logs\live_churn_test_20260509_004454` で、USDT-FUTURES `QUOTE_ASK` sell fill 後に SPOT hedge ticket が `OPEN` のまま、同一 cycle で `unhedged_exceeded` による Futures `FLATTEN` buy が走った。
+- Futures は flat に戻った後も `process_hedge_tickets` が `hedge_chase` を継続し、SPOT `HEDGE` buy が約定した。
+- 結果として `spot_pos=0.01998` / `perp_pos=0.0` 相当の SPOT 残が発生した。
+
+### 推論
+- 主因は、`unhedged_exceeded` が OPEN hedge ticket の期限内完了待ちを考慮せず flatten を開始したこと。
+- さらに、flatten 開始時に OPEN hedge ticket を fail していなかったため、flatten 後も hedge chase が継続した。
+
+### 実装
+- `bot/oms/oms.py`
+  - `HedgeTicketSnapshot` を追加。
+  - `has_open_hedge_ticket()` / `open_hedge_ticket_snapshot()` / `should_defer_flatten_for_hedge_ticket()` を追加。
+  - `flatten()` 開始時に `fail_open_tickets("flatten_started")` を呼び、以後の `hedge_chase` を止めるようにした。
+- `bot/strategy/mm_funding.py`
+  - `unhedged_exceeded` 発火時、OPEN hedge ticket が期限内なら flatten を出さず、`cancel_all(reason="unhedged_exceeded_deferred_for_hedge_ticket")` に留めるようにした。
+  - `unhedged_qty` / `unhedged_notional` / hedge ticket 情報 / positions / `action_taken` を risk log に追加。
+- `tests/test_hedge_ticket_flatten_race.py`
+  - 期限前 ticket では flatten を defer し active quote cancel に留めることを追加。
+  - 期限後 ticket では flatten に進むことを追加。
+  - flatten 開始時に OPEN ticket が `ticket_failed` になり、その後 `hedge_chase` / SPOT `HEDGE` order_new が出ないことを追加。
+
+### 検証
+- `.venv\Scripts\python -m pytest tests\test_hedge_ticket_flatten_race.py -q`: 3 passed。
+- `.venv\Scripts\python -m pytest -q`: 79 passed。
+- `git diff -- config.yaml`: 差分なし。
+
+### 未確定点
+- 修正後の live bounded 再確認は未実施。
+- live 起動、実ポジション操作、注文キャンセル、config.yaml 変更は未実施。
