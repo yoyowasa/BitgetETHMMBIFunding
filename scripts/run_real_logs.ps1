@@ -90,6 +90,11 @@ Assert-SingleInstance $cmdString  # 役割: 実行前に多重起動をブロッ
 
 $gitSha = Get-GitSha  # 役割: git sha を取得する
 
+# 役割: bot本体の system.jsonl でも wrapper と同じ実行ID/sha/cmd を記録できるようにする
+[Environment]::SetEnvironmentVariable("RUN_ID", $runId, "Process")
+[Environment]::SetEnvironmentVariable("GIT_SHA", $gitSha, "Process")
+[Environment]::SetEnvironmentVariable("REAL_LOG_EFFECTIVE_CMD", $cmdString, "Process")
+
 Write-Meta $metaJson @{
   run_id = $runId
   ts_utc = $tsUtc

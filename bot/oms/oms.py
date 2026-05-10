@@ -80,6 +80,9 @@ class LRUSet:
             oldest_key = min(self._data.items(), key=lambda kv: kv[1])[0]
             self._data.pop(oldest_key, None)
 
+    def __len__(self) -> int:
+        return len(self._data)
+
 
 class PositionTracker:
     def __init__(self):
@@ -132,6 +135,15 @@ class OMS:
         self._last_logged_spot_pos: float | None = None
         self._last_logged_perp_pos: float | None = None
         self._positions_sync_authoritative = False
+        self._fill_parse_warning_count = 0
+        self._last_fill_monitor_heartbeat_ts = 0.0
+        self._last_fill_ts: float | None = None
+        self._last_fill_id: str | None = None
+        self._last_fill_monitor_exception: str | None = None
+        self._last_positions_monitor_heartbeat_ts = 0.0
+        self._last_positions_sync_ts: float | None = None
+        self._last_parsed_perp_pos: float | None = None
+        self._last_positions_monitor_exception: str | None = None
 
     @property
     def positions(self) -> PositionTracker:
@@ -337,7 +349,16 @@ class OMS:
 
     async def sync_positions(self, timeout_sec: float = 5.0, poll_interval: float = 5.0) -> None:
         while True:
-            await self._sync_positions_once(timeout_sec=timeout_sec)
+            store_positions_count = 0
+            try:
+                positions_store = getattr(getattr(self._gateway, "store", None), "positions", None)
+                if positions_store is not None:
+                    store_positions_count = len(list(positions_store.find()))
+                await self._sync_positions_once(timeout_sec=timeout_sec)
+                self._last_positions_monitor_exception = None
+            except Exception as exc:
+                self._last_positions_monitor_exception = repr(exc)
+            self._log_positions_monitor_heartbeat(store_positions_count)
             await asyncio.sleep(poll_interval)
 
     async def _sync_positions_once(self, timeout_sec: float = 5.0) -> None:
@@ -354,6 +375,8 @@ class OMS:
         perp_pos = self._perp_pos_from_store(positions_store)
         if perp_pos is None:
             return
+        self._last_parsed_perp_pos = perp_pos
+        self._last_positions_sync_ts = time.time()
         self._positions.perp_pos = perp_pos
         self._positions_sync_authoritative = True
         now = time.time()
@@ -387,10 +410,15 @@ class OMS:
 
     async def monitor_fills(self, poll_interval: float = 0.2) -> None:
         while True:
+            monitor_exception = None
             try:
                 rows = list(self._gateway.store.fill.find())
-            except Exception:
+            except Exception as exc:
                 rows = []
+                monitor_exception = repr(exc)
+                self._last_fill_monitor_exception = monitor_exception
+            else:
+                self._last_fill_monitor_exception = None
             for row in rows:
                 event = self._parse_fill(row)
                 if event is None:
@@ -399,8 +427,69 @@ class OMS:
                 if dedupe_key in self._seen_fills:
                     continue
                 self._seen_fills.add(dedupe_key)
+                self._last_fill_ts = event.ts
+                self._last_fill_id = event.fill_id
                 await self.ingest_fill(event, simulated=False, source="ws_private_fill")
+            self._log_fill_monitor_heartbeat(len(rows), monitor_exception)
             await asyncio.sleep(poll_interval)
+
+    def _log_fill_monitor_heartbeat(
+        self,
+        store_fill_count: int,
+        monitor_exception: str | None,
+        *,
+        interval_sec: float = 60.0,
+    ) -> None:
+        now = time.time()
+        if (now - self._last_fill_monitor_heartbeat_ts) < interval_sec:
+            return
+        self._last_fill_monitor_heartbeat_ts = now
+        self._orders_logger.log(
+            {
+                "ts": now,
+                "event": "fill_monitor_heartbeat",
+                "intent": "SYSTEM",
+                "source": "oms",
+                "mode": "RUN",
+                "reason": "fill_monitor_heartbeat",
+                "leg": "fill",
+                "store_fill_count": store_fill_count,
+                "seen_fill_count": len(self._seen_fills),
+                "last_fill_ts": self._last_fill_ts,
+                "last_fill_id": self._last_fill_id,
+                "parse_warning_count": self._fill_parse_warning_count,
+                "monitor_exception": monitor_exception or self._last_fill_monitor_exception,
+                "task_alive": True,
+            }
+        )
+
+    def _log_positions_monitor_heartbeat(
+        self,
+        store_positions_count: int,
+        *,
+        interval_sec: float = 60.0,
+    ) -> None:
+        now = time.time()
+        if (now - self._last_positions_monitor_heartbeat_ts) < interval_sec:
+            return
+        self._last_positions_monitor_heartbeat_ts = now
+        self._orders_logger.log(
+            {
+                "ts": now,
+                "event": "positions_monitor_heartbeat",
+                "intent": "SYSTEM",
+                "source": "oms",
+                "mode": "RUN",
+                "reason": "positions_monitor_heartbeat",
+                "leg": "positions",
+                "store_positions_count": store_positions_count,
+                "parsed_perp_pos": self._last_parsed_perp_pos,
+                "positions_sync_authoritative": self._positions_sync_authoritative,
+                "last_positions_sync_ts": self._last_positions_sync_ts,
+                "monitor_exception": self._last_positions_monitor_exception,
+                "task_alive": True,
+            }
+        )
 
     async def process_hedge_tickets(
         self,
@@ -1411,6 +1500,7 @@ class OMS:
         size_key: str | None = None,
         size_value: object | None = None,
     ) -> None:
+        self._fill_parse_warning_count += 1
         self._orders_logger.log(
             {
                 "ts": time.time(),

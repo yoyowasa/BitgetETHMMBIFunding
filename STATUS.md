@@ -2108,3 +2108,35 @@ ec1b00a  chore: bulk update after lint & format
 - 修正後の live 起動は未実施。
 - 実ポジション操作、実注文、決済、キャンセル、`config.yaml` 変更は未実施。
 - `40804` / `22002` を reject_streak 対象外にするかは未判断。今回は position sync + order_skip で連発防止を優先。
+
+---
+
+## 2026-05-11 live watch LOG_DIR 取り違え調査 / 監視ログ追加
+
+### 観測事実
+- 異常に見えた `fills=0` / internal `pos_spot=0` / `pos_perp=0` / `delta=0` は、監視対象 LOG_DIR の取り違えが主因だった。
+- `runtime_logs\live_watch_after_position_fix_20260511_015257` は Codex 側で起動して停止した別 run で、01:56 台に `shutdown_cancel_all_done` まで到達していた。
+- 実約定 run は `runtime_logs\live_watch_after_position_fix_20260511_015906` だった。
+- `015906` では Futures `QUOTE_ASK` sell 0.02 fill と SPOT `HEDGE` buy 0.02 fill が `fills.jsonl` に記録されていた。
+- `015906` では `ticket_open=1` / `ticket_done=1` / `ticket_failed=0` / `positions_sync=26` / `fill_parse_warning=0` / `40804=0` / `22002=0` / `43012=0`。
+- `015906` の internal position は `pos_spot=0.01998` / `pos_perp=-0.02` / `delta≈-0.00002` に反映されていた。
+
+### 推論
+- 当該 run では private WS fill channel、`store.fill.find()`、SPOT hedge、ticket_done、positions sync は機能していた。
+- ただし LOG_DIR と RUN_ID の識別ログ、fill monitor heartbeat、positions monitor heartbeat が無く、監視時の取り違えや monitor 生存確認の切り分けが弱かった。
+
+### 実装
+- `scripts/run_real_logs.ps1`
+  - wrapper で生成した `RUN_ID` / `GIT_SHA` / 実効コマンドを bot 子プロセスの環境変数へ渡すようにした。
+- `bot/app.py`
+  - 起動直後に `runtime_log_dir_identity` を `system.jsonl` へ記録するようにした。
+  - ログ項目: `LOG_DIR` / `RUN_ID` / `git_sha` / `pid` / `ppid` / `cmd` / `config_path` / `dry_run` / `bot_mode`。
+- `bot/oms/oms.py`
+  - `monitor_fills()` に `fill_monitor_heartbeat` を追加した。
+  - ログ項目: `store_fill_count` / `seen_fill_count` / `last_fill_ts` / `last_fill_id` / `parse_warning_count` / `monitor_exception` / `task_alive`。
+  - `sync_positions()` 周辺に `positions_monitor_heartbeat` を追加した。
+  - ログ項目: `store_positions_count` / `parsed_perp_pos` / `positions_sync_authoritative` / `last_positions_sync_ts` / `monitor_exception` / `task_alive`。
+
+### 未確定点
+- 追加ログの live 実運用での実出力確認は未実施。
+- live 起動、注文、決済、キャンセル、`config.yaml` 変更は未実施。

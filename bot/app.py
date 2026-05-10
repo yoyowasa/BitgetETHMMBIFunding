@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import os
 import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -97,6 +98,58 @@ def _log_startup_flags(logger, *, stage: str, private_enabled=None, dry_run=None
         f"[startup_flags] stage={stage} env_DRY_RUN={env_dry_run} "
         f"private_enabled={private_enabled} dry_run={dry_run}",
         flush=True,
+    )
+
+
+def _git_sha() -> str:
+    env_sha = os.environ.get("GIT_SHA")
+    if env_sha:
+        return env_sha
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except Exception:
+        return "unknown"
+    if result.returncode != 0:
+        return "unknown"
+    return result.stdout.strip() or "unknown"
+
+
+def _log_runtime_identity(
+    logger: JsonlLogger,
+    *,
+    log_dir: Path,
+    config_path: str,
+    dry_run: bool,
+    bot_mode: str,
+) -> None:
+    cmd = (
+        os.environ.get("REAL_LOG_EFFECTIVE_CMD")
+        or os.environ.get("REAL_LOG_CMD")
+        or " ".join([sys.executable, *sys.argv])
+    )
+    logger.log(
+        {
+            "event": "runtime_log_dir_identity",
+            "intent": "SYSTEM",
+            "source": "runtime",
+            "mode": "INIT",
+            "reason": "runtime_log_dir_identity",
+            "leg": "process",
+            "LOG_DIR": str(log_dir),
+            "RUN_ID": os.environ.get("RUN_ID") or "",
+            "git_sha": _git_sha(),
+            "pid": os.getpid(),
+            "ppid": os.getppid() if hasattr(os, "getppid") else None,
+            "cmd": cmd,
+            "config_path": config_path,
+            "dry_run": dry_run,
+            "bot_mode": bot_mode,
+        }
     )
 
 
@@ -451,6 +504,13 @@ async def _run() -> None:
         stage="after_dry_run",
         private_enabled=None,
         dry_run=config.strategy.dry_run,
+    )
+    _log_runtime_identity(
+        system_logger,
+        log_dir=log_dir,
+        config_path=args.config,
+        dry_run=config.strategy.dry_run,
+        bot_mode=bot_mode,
     )
     loop_lag_task = asyncio.create_task(_loop_lag_probe(system_logger))
 
