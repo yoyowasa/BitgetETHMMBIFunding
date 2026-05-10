@@ -131,6 +131,7 @@ class OMS:
         self._last_position_log_ts = 0.0
         self._last_logged_spot_pos: float | None = None
         self._last_logged_perp_pos: float | None = None
+        self._positions_sync_authoritative = False
 
     @property
     def positions(self) -> PositionTracker:
@@ -276,6 +277,8 @@ class OMS:
             await self._cancel_all_quotes_unlocked(reason=reason)
             if not self._gateway.constraints.ready():
                 return
+            perp_pos_before_sync = self._positions.perp_pos
+            await self._sync_positions_once(timeout_sec=0.2)
             if self._positions.perp_pos != 0:
                 side = Side.BUY if self._positions.perp_pos < 0 else Side.SELL
                 size = abs(self._positions.perp_pos)
@@ -293,6 +296,13 @@ class OMS:
                         reduce_only=True,
                     ),
                     reason=reason,
+                )
+            elif self._positions_sync_authoritative and abs(perp_pos_before_sync) > 1e-12:
+                self._log_futures_flatten_skip_no_position(
+                    cycle_id=cycle_id,
+                    reason=reason,
+                    side=None,
+                    size=0.0,
                 )
         if spot_bbo and self._positions.spot_pos != 0:
             side = Side.SELL if self._positions.spot_pos > 0 else Side.BUY
@@ -331,7 +341,8 @@ class OMS:
             await asyncio.sleep(poll_interval)
 
     async def _sync_positions_once(self, timeout_sec: float = 5.0) -> None:
-        positions_store = getattr(self._gateway.store, "positions", None)
+        store = getattr(self._gateway, "store", None)
+        positions_store = getattr(store, "positions", None)
         if positions_store is None:
             return
         wait = getattr(positions_store, "wait", None)
@@ -344,6 +355,7 @@ class OMS:
         if perp_pos is None:
             return
         self._positions.perp_pos = perp_pos
+        self._positions_sync_authoritative = True
         now = time.time()
         changed = (
             self._last_logged_spot_pos != self._positions.spot_pos
@@ -446,23 +458,7 @@ class OMS:
                 self._cleanup_ticket(ticket_id)
                 continue
             ticket.status = "FAILED"
-            self._orders_logger.log(
-                {
-                    "event": "state",
-                    "intent": OrderIntent.HEDGE.value,
-                    "source": "oms",
-                    "mode": "HEDGING",
-                    "reason": "ticket_failed",
-                    "leg": "spot_ioc",
-                    "cycle_id": None,
-                    "ticket_id": ticket.ticket_id,
-                    "want_qty": ticket.want_qty,
-                    "filled_qty": ticket.filled_qty,
-                    "remain": ticket.remain,
-                    "tries": ticket.tries,
-                    "fail_reason": reason,
-                }
-            )
+            self._log_ticket_failed(ticket, reason)
             self._cleanup_ticket(ticket_id)
 
     async def _handle_fill(
@@ -497,7 +493,57 @@ class OMS:
                 "simulated": simulated,
             }
         )
-        self._positions.apply_fill(event)
+        perp_pos_before = self._positions.perp_pos
+        positions_sync_authoritative = self._positions_sync_authoritative and not self._dry_run
+        futures_position_accounting_skipped = (
+            event.inst_type == InstType.USDT_FUTURES and positions_sync_authoritative
+        )
+        if futures_position_accounting_skipped:
+            self._orders_logger.log(
+                {
+                    "ts": time.time(),
+                    "event": "risk",
+                    "intent": "SYSTEM",
+                    "source": "oms",
+                    "mode": "RUN",
+                    "reason": "futures_fill_position_accounting_skipped_positions_sync_authoritative",
+                    "leg": "fill",
+                    "inst_type": event.inst_type.value,
+                    "symbol": event.symbol,
+                    "side": event.side.value,
+                    "size": event.size,
+                    "order_id": event.order_id,
+                    "client_oid": event.client_oid,
+                    "fill_id": event.fill_id,
+                    "perp_pos_before": perp_pos_before,
+                    "perp_pos_after": self._positions.perp_pos,
+                    "positions_sync_authoritative": positions_sync_authoritative,
+                }
+            )
+        else:
+            self._positions.apply_fill(event)
+            if event.inst_type == InstType.USDT_FUTURES:
+                self._orders_logger.log(
+                    {
+                        "ts": time.time(),
+                        "event": "risk",
+                        "intent": "SYSTEM",
+                        "source": "oms",
+                        "mode": "RUN",
+                        "reason": "futures_fill_position_accounting_applied",
+                        "leg": "fill",
+                        "inst_type": event.inst_type.value,
+                        "symbol": event.symbol,
+                        "side": event.side.value,
+                        "size": event.size,
+                        "order_id": event.order_id,
+                        "client_oid": event.client_oid,
+                        "fill_id": event.fill_id,
+                        "perp_pos_before": perp_pos_before,
+                        "perp_pos_after": self._positions.perp_pos,
+                        "positions_sync_authoritative": positions_sync_authoritative,
+                    }
+                )
         if (
             event.inst_type == InstType.SPOT
             and event.fee_coin
@@ -528,7 +574,10 @@ class OMS:
         if intent == OrderIntent.HEDGE or ticket_id is not None:
             self._apply_hedge_fill(event, ticket_id)
             return
-        if intent in (OrderIntent.FLATTEN, OrderIntent.UNWIND):
+        if intent == OrderIntent.UNWIND:
+            self._apply_unwind_fill(event)
+            return
+        if intent == OrderIntent.FLATTEN:
             return
         if event.inst_type == InstType.USDT_FUTURES:
             if intent in (OrderIntent.QUOTE_BID, OrderIntent.QUOTE_ASK):
@@ -583,6 +632,14 @@ class OMS:
     ) -> None:
         if ticket.remain <= 0:
             return
+        if ticket.side == Side.SELL:
+            allowed = await self._precheck_spot_hedge_sell_available(ticket)
+            if not allowed:
+                await self._unwind_ticket(ticket, reason="spot_hedge_insufficient_available_precheck")
+                ticket.status = "FAILED"
+                self._log_ticket_failed(ticket, "spot_hedge_insufficient_available_precheck")
+                self._cleanup_ticket(ticket.ticket_id)
+                return
         order_type, force, price = self._spot_hedge_order_plan(ticket, spot_bbo, slip_bps)
         client_oid = (
             ticket.ticket_id
@@ -753,6 +810,25 @@ class OMS:
             for key in keys:
                 mapping.pop(key, None)
 
+    def _log_ticket_failed(self, ticket: HedgeTicket, reason: str) -> None:
+        self._orders_logger.log(
+            {
+                "event": "state",
+                "intent": OrderIntent.HEDGE.value,
+                "source": "oms",
+                "mode": "HEDGING",
+                "reason": "ticket_failed",
+                "leg": "spot_ioc",
+                "cycle_id": None,
+                "ticket_id": ticket.ticket_id,
+                "want_qty": ticket.want_qty,
+                "filled_qty": ticket.filled_qty,
+                "remain": ticket.remain,
+                "tries": ticket.tries,
+                "fail_reason": reason,
+            }
+        )
+
     def _add_unhedged(self, event: ExecutionEvent) -> None:
         delta = event.size if event.side == Side.SELL else -event.size
         self._unhedged_qty += delta
@@ -762,6 +838,40 @@ class OMS:
             spot_mid = self._spot_mid()
             if spot_mid is not None:
                 self._pnl.update_max_unhedged_notional(abs(self._unhedged_qty) * spot_mid)
+
+    def _apply_unwind_fill(self, event: ExecutionEvent) -> None:
+        if event.inst_type != InstType.USDT_FUTURES:
+            return
+        before = self._unhedged_qty
+        delta = event.size if event.side == Side.SELL else -event.size
+        self._unhedged_qty += delta
+        if abs(self._unhedged_qty) <= 1e-9:
+            self._unhedged_qty = 0.0
+            self._unhedged_since = None
+        self._orders_logger.log(
+            {
+                "ts": time.time(),
+                "event": "risk",
+                "intent": OrderIntent.UNWIND.value,
+                "source": "oms",
+                "mode": "RUN",
+                "reason": "unwind_fill_unhedged_qty_reconciled",
+                "leg": "perp_unwind",
+                "inst_type": event.inst_type.value,
+                "symbol": event.symbol,
+                "side": event.side.value,
+                "size": event.size,
+                "order_id": event.order_id,
+                "client_oid": event.client_oid,
+                "fill_id": event.fill_id,
+                "unhedged_qty_before": before,
+                "unhedged_qty_after": self._unhedged_qty,
+                "unhedged_since": self._unhedged_since,
+                "perp_pos_internal": self._positions.perp_pos,
+                "spot_pos_internal": self._positions.spot_pos,
+                "delta": self._positions.spot_pos + self._positions.perp_pos,
+            }
+        )
 
     def _get_symbol_lock(self, symbol: str) -> asyncio.Lock:
         lock = self._symbol_locks.get(symbol)
@@ -1002,6 +1112,10 @@ class OMS:
                             if str(resp_code) == "43012"
                             and req.inst_type == InstType.SPOT
                             and req.intent == OrderIntent.FLATTEN
+                            else "spot_sell_insufficient_balance"
+                            if str(resp_code) == "43012"
+                            and req.inst_type == InstType.SPOT
+                            and req.side == Side.SELL
                             else None
                         ),
                     }
@@ -1495,6 +1609,114 @@ class OMS:
             client_oid=client_oid,
         )
         return True
+
+    def _log_futures_flatten_skip_no_position(
+        self,
+        *,
+        cycle_id: int,
+        reason: str,
+        side: Side | None,
+        size: float,
+    ) -> None:
+        self._orders_logger.log(
+            {
+                "ts": time.time(),
+                "event": "order_skip",
+                "intent": OrderIntent.FLATTEN.value,
+                "source": "oms",
+                "mode": "RUN",
+                "reason": "futures_flatten_no_position_after_sync",
+                "state": "blocked_precheck",
+                "leg": "perp",
+                "cycle_id": cycle_id,
+                "inst_type": InstType.USDT_FUTURES.value,
+                "symbol": self._config.symbols.perp.symbol,
+                "side": None if side is None else side.value,
+                "size": size,
+                "perp_pos_internal": self._positions.perp_pos,
+                "spot_pos_internal": self._positions.spot_pos,
+                "delta": self._positions.spot_pos + self._positions.perp_pos,
+                "positions_sync_authoritative": self._positions_sync_authoritative,
+                "original_reason": reason,
+                "action_taken": "skip_flatten",
+            }
+        )
+
+    async def _precheck_spot_hedge_sell_available(self, ticket: HedgeTicket) -> bool:
+        base_coin = self._spot_base_coin()
+        spot_available = await self._get_spot_available_balance(base_coin)
+        if spot_available is None:
+            self._orders_logger.log(
+                {
+                    "ts": time.time(),
+                    "event": "risk",
+                    "intent": OrderIntent.HEDGE.value,
+                    "source": "oms",
+                    "mode": "HEDGING",
+                    "reason": "spot_hedge_available_precheck_unavailable",
+                    "leg": "spot",
+                    "cycle_id": None,
+                    "ticket_id": ticket.ticket_id,
+                    "remain": ticket.remain,
+                    "spot_available": None,
+                    "side": ticket.side.value,
+                    "symbol": ticket.symbol,
+                    "base_coin": base_coin,
+                    "perp_pos_internal": self._positions.perp_pos,
+                    "spot_pos_internal": self._positions.spot_pos,
+                    "delta": self._positions.spot_pos + self._positions.perp_pos,
+                    "action_taken": "warn_only",
+                }
+            )
+            return True
+        if spot_available + 1e-12 >= ticket.remain:
+            self._orders_logger.log(
+                {
+                    "ts": time.time(),
+                    "event": "risk",
+                    "intent": OrderIntent.HEDGE.value,
+                    "source": "oms",
+                    "mode": "HEDGING",
+                    "reason": "spot_hedge_available_precheck",
+                    "leg": "spot",
+                    "cycle_id": None,
+                    "ticket_id": ticket.ticket_id,
+                    "remain": ticket.remain,
+                    "spot_available": spot_available,
+                    "side": ticket.side.value,
+                    "symbol": ticket.symbol,
+                    "base_coin": base_coin,
+                    "perp_pos_internal": self._positions.perp_pos,
+                    "spot_pos_internal": self._positions.spot_pos,
+                    "delta": self._positions.spot_pos + self._positions.perp_pos,
+                    "action_taken": "continue_hedge",
+                }
+            )
+            return True
+        self._orders_logger.log(
+            {
+                "ts": time.time(),
+                "event": "order_skip",
+                "intent": OrderIntent.HEDGE.value,
+                "source": "oms",
+                "mode": "HEDGING",
+                "reason": "spot_hedge_insufficient_available_precheck",
+                "state": "blocked_precheck",
+                "leg": "spot",
+                "cycle_id": None,
+                "ticket_id": ticket.ticket_id,
+                "remain": ticket.remain,
+                "spot_available": spot_available,
+                "side": ticket.side.value,
+                "symbol": ticket.symbol,
+                "base_coin": base_coin,
+                "perp_pos_internal": self._positions.perp_pos,
+                "spot_pos_internal": self._positions.spot_pos,
+                "delta": self._positions.spot_pos + self._positions.perp_pos,
+                "action_taken": "unwind_ticket",
+            }
+        )
+        return False
 
     def _log_spot_flatten_available_precheck(
         self,

@@ -118,9 +118,15 @@ class DummyInstrumentConstraints:
 
 
 class OMSGateway:
-    def __init__(self) -> None:
+    def __init__(self, *, spot_available: float | None = None, position_rows: list[dict] | None = None) -> None:
         self.constraints = DummyConstraintsManager()
         self.orders: list[OrderRequest] = []
+        self.spot_available = spot_available
+        self.store = SimpleNamespace(positions=SimpleNamespace(find=lambda: position_rows or []))
+
+    async def get_spot_available_balance(self, base_coin: str) -> float | None:
+        assert base_coin == "ETH"
+        return self.spot_available
 
     async def place_order(self, req: OrderRequest) -> dict:
         self.orders.append(req)
@@ -292,3 +298,92 @@ def test_flatten_fails_open_hedge_ticket_and_stops_chase() -> None:
         for record in orders_logger.records
         if record.get("event") == "order_new" and record.get("intent") == "HEDGE"
     ] == []
+
+
+def test_spot_hedge_sell_available_precheck_unwinds_without_chase() -> None:
+    gateway = OMSGateway(spot_available=0.0)
+    orders_logger = CapturingLogger()
+    oms = OMS(
+        gateway,
+        _config(),
+        risk=None,
+        orders_logger=orders_logger,
+        fills_logger=CapturingLogger(),
+    )
+    now = time.time()
+    oms._hedge_tickets["ticket-1"] = HedgeTicket(
+        ticket_id="ticket-1",
+        symbol="ETHUSDT",
+        side=Side.SELL,
+        want_qty=0.02,
+        filled_qty=0.0,
+        created_ts=now - 10.0,
+        deadline_ts=now - 5.0,
+        tries=0,
+        status="OPEN",
+        reason="perp_fill",
+        perp_fill_ts=now - 10.0,
+        perp_fill_price=100.0,
+    )
+
+    asyncio.run(
+        oms.process_hedge_tickets(
+            SimpleNamespace(bid=100.0, ask=100.2, bid_size=1.0, ask_size=1.0)
+        )
+    )
+
+    hedge_orders = [order for order in gateway.orders if order.inst_type == InstType.SPOT]
+    unwind_orders = [order for order in gateway.orders if order.intent.value == "UNWIND"]
+    assert hedge_orders == []
+    assert len(unwind_orders) == 1
+    assert unwind_orders[-1].side == Side.SELL
+    assert oms.has_open_hedge_ticket() is False
+    skips = [
+        record
+        for record in orders_logger.records
+        if record.get("reason") == "spot_hedge_insufficient_available_precheck"
+        and record.get("event") == "order_skip"
+    ]
+    assert skips
+    assert skips[-1]["action_taken"] == "unwind_ticket"
+    failed = [record for record in orders_logger.records if record.get("reason") == "ticket_failed"]
+    assert failed
+    assert failed[-1]["fail_reason"] == "spot_hedge_insufficient_available_precheck"
+    assert [
+        record
+        for record in orders_logger.records
+        if record.get("event") == "order_new" and record.get("intent") == "HEDGE"
+    ] == []
+
+
+def test_flatten_skips_futures_order_when_position_sync_reports_flat() -> None:
+    gateway = OMSGateway(
+        position_rows=[
+            {
+                "symbol": "ETHUSDT",
+                "total": "0",
+                "holdSide": "long",
+            }
+        ]
+    )
+    orders_logger = CapturingLogger()
+    oms = OMS(
+        gateway,
+        _config(),
+        risk=None,
+        orders_logger=orders_logger,
+        fills_logger=CapturingLogger(),
+    )
+    oms.positions.perp_pos = 0.02
+
+    asyncio.run(oms.flatten(None, cycle_id=123, reason="unhedged_exceeded"))
+
+    assert gateway.orders == []
+    skips = [
+        record
+        for record in orders_logger.records
+        if record.get("reason") == "futures_flatten_no_position_after_sync"
+    ]
+    assert skips
+    assert skips[-1]["positions_sync_authoritative"] is True
+    assert skips[-1]["action_taken"] == "skip_flatten"

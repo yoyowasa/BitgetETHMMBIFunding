@@ -2067,3 +2067,44 @@ ec1b00a  chore: bulk update after lint & format
 ### 未確定点
 - 常駐起動は未実施。
 - config 反映後の live 常駐確認は未実施。
+
+---
+
+## 2026-05-10 live_watch_20260509_220735 HALTED 対応
+
+### 観測事実
+- `runtime_logs\live_watch_20260509_220735` は 60 分監視中に `HALTED=1` / `order_reject=7` / `fills=2` / `ticket_open=1` / `ticket_done=0` となった。
+- `QUOTE_BID` futures buy 0.02 fill 後、SPOT `HEDGE` sell 0.02 が `43012 Insufficient balance` で 2 回 reject された。
+- `UNWIND` futures sell 0.02 は約定し、read-only 確認では SPOT/Futures とも open orders なし、Futures position なし、SPOT は dust のみだった。
+- ただし BOT 内部最終ログは `HALTED / pos_spot=0.0 / pos_perp=0.02 / delta=0.02` だった。
+- `UNWIND` 後に Futures `FLATTEN` sell が `40804` x1 / `22002` x4 で reject された。
+
+### 推論
+- `43012` は USDT 不足ではなく、SPOT `HEDGE` sell に必要な ETH available 不足が主因。
+- `positions_sync` と USDT-FUTURES fill accounting の二重反映により、internal `perp_pos` が実口座より大きくなった可能性が高い。
+- `UNWIND` 約定後も internal `perp_pos` が残ったため、不要な reduce-only `FLATTEN` が連発した可能性が高い。
+
+### 実装
+- `bot/oms/oms.py`
+  - private positions sync が一度成功した live では、USDT-FUTURES fill による `perp_pos` 加算をスキップし、`positions_sync` を authoritative source とするログを追加。
+  - positions sync が無い環境や dry-run では、従来どおり futures fill accounting を fallback として維持。
+  - SPOT `HEDGE` sell 前に ETH available precheck を追加し、available < remain の場合は HEDGE order を出さず、`spot_hedge_insufficient_available_precheck` を記録して `UNWIND` に進める。
+  - `ticket_failed` ログ出力を helper 化。
+  - `flatten()` 直前に futures position store を再同期し、実 position が 0 の場合は `futures_flatten_no_position_after_sync` で `FLATTEN` order を skip する。
+  - `UNWIND` futures fill で `unhedged_qty` を解消し、実 position flat 後も strategy が unhedged と見続ける状態を避ける。
+- `tests/test_fill_parser.py`
+  - positions sync authoritative 時に futures fill accounting が二重加算されないことを追加。
+  - positions sync が無い場合は futures fill accounting が fallback として動くことを追加。
+  - positions sync authoritative 時の `UNWIND` fill で `unhedged_qty` が 0 に戻ることを追加。
+- `tests/test_hedge_ticket_flatten_race.py`
+  - SPOT `HEDGE` sell の ETH available 不足で HEDGE order を出さず `UNWIND` に進むことを追加。
+  - futures position sync が flat を返す場合、`FLATTEN` order を出さないことを追加。
+
+### 検証
+- `.venv\Scripts\python.exe -m pytest tests\test_fill_parser.py tests\test_hedge_ticket_flatten_race.py tests\test_spot_balance_precheck.py -q`: 23 passed。
+- `.venv\Scripts\python.exe -m pytest -q`: 84 passed。
+
+### 未確定点
+- 修正後の live 起動は未実施。
+- 実ポジション操作、実注文、決済、キャンセル、`config.yaml` 変更は未実施。
+- `40804` / `22002` を reject_streak 対象外にするかは未判断。今回は position sync + order_skip で連発防止を優先。

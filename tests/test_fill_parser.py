@@ -345,3 +345,114 @@ def test_spot_fee_coin_missing_logs_warning_and_keeps_size_accounting() -> None:
     assert logger.records[-1]["reason"] == "fill_parse_warning"
     assert logger.records[-1]["parse_reason"] == "spot_fee_coin_missing"
     assert "fee" in logger.records[-1]["raw_keys"]
+
+
+def test_futures_fill_accounting_skips_when_positions_sync_is_authoritative() -> None:
+    oms, logger = _oms()
+    oms._dry_run = False
+    oms._positions_sync_authoritative = True
+    oms.positions.perp_pos = 0.02
+
+    import asyncio
+
+    asyncio.run(
+        oms.ingest_fill(
+            ExecutionEvent(
+                inst_type=InstType.USDT_FUTURES,
+                symbol="ETHUSDT",
+                order_id="futures-fill",
+                client_oid="UNWIND-futures-fill",
+                fill_id="futures-fill-id",
+                side=Side.BUY,
+                price=2300.0,
+                size=0.02,
+                fee=-0.01,
+                fee_coin="USDT",
+                ts=1.0,
+            )
+        )
+    )
+
+    assert oms.positions.perp_pos == 0.02
+    skips = [
+        record
+        for record in logger.records
+        if record.get("reason")
+        == "futures_fill_position_accounting_skipped_positions_sync_authoritative"
+    ]
+    assert skips
+    assert skips[-1]["perp_pos_before"] == 0.02
+    assert skips[-1]["perp_pos_after"] == 0.02
+
+
+def test_futures_fill_accounting_fallback_applies_without_positions_sync() -> None:
+    oms, logger = _oms()
+    oms._dry_run = False
+
+    import asyncio
+
+    asyncio.run(
+        oms.ingest_fill(
+            ExecutionEvent(
+                inst_type=InstType.USDT_FUTURES,
+                symbol="ETHUSDT",
+                order_id="futures-fill",
+                client_oid="UNWIND-futures-fill",
+                fill_id="futures-fill-id",
+                side=Side.BUY,
+                price=2300.0,
+                size=0.02,
+                fee=-0.01,
+                fee_coin="USDT",
+                ts=1.0,
+            )
+        )
+    )
+
+    assert oms.positions.perp_pos == 0.02
+    applied = [
+        record
+        for record in logger.records
+        if record.get("reason") == "futures_fill_position_accounting_applied"
+    ]
+    assert applied
+    assert applied[-1]["positions_sync_authoritative"] is False
+
+
+def test_unwind_fill_reconciles_unhedged_qty_with_positions_sync_authoritative() -> None:
+    oms, logger = _oms()
+    oms._dry_run = False
+    oms._positions_sync_authoritative = True
+    oms._unhedged_qty = -0.02
+    oms._unhedged_since = 1.0
+
+    import asyncio
+
+    asyncio.run(
+        oms.ingest_fill(
+            ExecutionEvent(
+                inst_type=InstType.USDT_FUTURES,
+                symbol="ETHUSDT",
+                order_id="unwind-fill",
+                client_oid="UNWIND-futures-fill",
+                fill_id="unwind-fill-id",
+                side=Side.SELL,
+                price=2300.0,
+                size=0.02,
+                fee=-0.01,
+                fee_coin="USDT",
+                ts=2.0,
+            )
+        )
+    )
+
+    assert oms.unhedged_qty == 0.0
+    assert oms.unhedged_since is None
+    reconciled = [
+        record
+        for record in logger.records
+        if record.get("reason") == "unwind_fill_unhedged_qty_reconciled"
+    ]
+    assert reconciled
+    assert reconciled[-1]["unhedged_qty_before"] == -0.02
+    assert reconciled[-1]["unhedged_qty_after"] == 0.0
