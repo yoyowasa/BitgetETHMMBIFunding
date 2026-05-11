@@ -144,6 +144,8 @@ class OMS:
         self._last_positions_sync_ts: float | None = None
         self._last_parsed_perp_pos: float | None = None
         self._last_positions_monitor_exception: str | None = None
+        self._last_positions_empty = False
+        self._unwind_pending_until = 0.0
 
     @property
     def positions(self) -> PositionTracker:
@@ -224,6 +226,10 @@ class OMS:
     def should_defer_flatten_for_hedge_ticket(self, now: float | None = None) -> bool:
         snapshot = self.open_hedge_ticket_snapshot(now=now)
         return snapshot is not None and not snapshot.expired
+
+    def should_defer_flatten_for_unwind_pending(self, now: float | None = None) -> bool:
+        now_ts = time.time() if now is None else now
+        return now_ts < self._unwind_pending_until
 
     def drain_quote_metrics(self) -> QuoteMetrics:
         metrics = QuoteMetrics(
@@ -372,9 +378,31 @@ class OMS:
                 await asyncio.wait_for(wait(), timeout=timeout_sec)
             except Exception:
                 pass
-        perp_pos = self._perp_pos_from_store(positions_store)
+        rows = list(positions_store.find())
+        positions_empty = len(rows) == 0
+        perp_pos = self._perp_pos_from_rows(rows)
+        if perp_pos is None and positions_empty:
+            self._last_positions_empty = True
+            if not self._dry_run and self._positions_sync_authoritative:
+                self._sync_positions_value(
+                    0.0,
+                    reason="positions_store_empty_assume_flat",
+                    positions_empty=True,
+                )
+            return
         if perp_pos is None:
             return
+        self._last_positions_empty = False
+        self._sync_positions_value(perp_pos, reason="positions_sync", positions_empty=False)
+
+    def _sync_positions_value(
+        self,
+        perp_pos: float,
+        *,
+        reason: str,
+        positions_empty: bool,
+    ) -> None:
+        old_perp_pos = self._positions.perp_pos
         self._last_parsed_perp_pos = perp_pos
         self._last_positions_sync_ts = time.time()
         self._positions.perp_pos = perp_pos
@@ -385,7 +413,8 @@ class OMS:
             or self._last_logged_perp_pos != self._positions.perp_pos
         )
         heartbeat_due = (now - self._last_position_log_ts) >= 60.0
-        if not changed and not heartbeat_due:
+        force_log = reason != "positions_sync"
+        if not changed and not heartbeat_due and not force_log:
             return
         self._last_logged_spot_pos = self._positions.spot_pos
         self._last_logged_perp_pos = self._positions.perp_pos
@@ -397,7 +426,7 @@ class OMS:
                 "intent": "SYSTEM",
                 "source": "oms",
                 "mode": "RUN",
-                "reason": "positions_sync",
+                "reason": reason,
                 "leg": "positions",
                 "state": "positions_sync",
                 "spot_pos": self._positions.spot_pos,
@@ -405,6 +434,9 @@ class OMS:
                 "delta": self._positions.spot_pos + self._positions.perp_pos,
                 "unhedged_qty": self._unhedged_qty,
                 "unhedged_since": self._unhedged_since,
+                "old_perp_pos": old_perp_pos,
+                "new_perp_pos": self._positions.perp_pos,
+                "positions_empty": positions_empty,
             }
         )
 
@@ -486,6 +518,7 @@ class OMS:
                 "parsed_perp_pos": self._last_parsed_perp_pos,
                 "positions_sync_authoritative": self._positions_sync_authoritative,
                 "last_positions_sync_ts": self._last_positions_sync_ts,
+                "positions_empty": self._last_positions_empty,
                 "monitor_exception": self._last_positions_monitor_exception,
                 "task_alive": True,
             }
@@ -802,7 +835,9 @@ class OMS:
                 "tries": ticket.tries,
             }
         )
-        await self._submit_order(req, reason=reason)
+        order_id = await self._submit_order(req, reason=reason)
+        if order_id:
+            self._unwind_pending_until = time.time() + max(2.0, self._hedge_cfg.hedge_deadline_sec)
 
     async def _hedge_perp_fill(self, event: ExecutionEvent) -> None:
         if not self._gateway.constraints.ready():
@@ -1159,6 +1194,8 @@ class OMS:
         resp_code = response.get("code")
         record["resp_code"] = resp_code
         self._orders_logger.log(record)
+        if await self._handle_reduce_only_no_position(req, response, resp_code, price_before_round, price_tick, price_place):
+            return None
         if self._risk is not None:
             ok = str(resp_code) == "00000"
             streak = self._risk.record_order_result(ok)
@@ -1213,6 +1250,84 @@ class OMS:
         if order_id:
             self._order_client_map[order_id] = req.client_oid
         return order_id
+
+    async def _handle_reduce_only_no_position(
+        self,
+        req: OrderRequest,
+        response: dict,
+        resp_code: object,
+        price_before_round: float | None,
+        price_tick: object,
+        price_place: int | None,
+    ) -> bool:
+        if str(resp_code) != "22002":
+            return False
+        if req.intent not in (OrderIntent.FLATTEN, OrderIntent.UNWIND):
+            return False
+        if req.reduce_only is not True or req.inst_type != InstType.USDT_FUTURES:
+            return False
+        self._orders_logger.log(
+            {
+                "ts": time.time(),
+                "event": "risk",
+                "intent": req.intent.value,
+                "source": "oms",
+                "mode": "RUN",
+                "reason": "reduce_only_no_position_assume_flat",
+                "leg": "perp",
+                "cycle_id": req.cycle_id,
+                "resp_code": resp_code,
+                "response_msg": response.get("msg"),
+                "inst_type": req.inst_type.value,
+                "symbol": req.symbol,
+                "side": req.side.value,
+                "size": req.size,
+                "client_oid": req.client_oid,
+                "price": req.price,
+                "price_before_round": price_before_round,
+                "price_after_round": req.price,
+                "tick_size": price_tick,
+                "pricePlace": price_place,
+                "spot_pos_internal": self._positions.spot_pos,
+                "perp_pos_internal": self._positions.perp_pos,
+                "delta": self._positions.spot_pos + self._positions.perp_pos,
+            }
+        )
+        await self._sync_positions_once(timeout_sec=0.2)
+        flat = abs(self._positions.perp_pos) <= 1e-12
+        if flat:
+            self._unwind_pending_until = 0.0
+        self._orders_logger.log(
+            {
+                "ts": time.time(),
+                "event": "risk",
+                "intent": req.intent.value,
+                "source": "oms",
+                "mode": "RUN",
+                "reason": (
+                    "reduce_only_no_position_sync_flat"
+                    if flat
+                    else "reduce_only_no_position_sync_not_flat"
+                ),
+                "leg": "perp",
+                "cycle_id": req.cycle_id,
+                "resp_code": resp_code,
+                "response_msg": response.get("msg"),
+                "inst_type": req.inst_type.value,
+                "symbol": req.symbol,
+                "side": req.side.value,
+                "size": req.size,
+                "client_oid": req.client_oid,
+                "spot_pos_internal": self._positions.spot_pos,
+                "perp_pos_internal": self._positions.perp_pos,
+                "delta": self._positions.spot_pos + self._positions.perp_pos,
+                "positions_sync_authoritative": self._positions_sync_authoritative,
+                "last_positions_sync_ts": self._last_positions_sync_ts,
+                "positions_empty": self._last_positions_empty,
+                "action_taken": "skip_reject_streak" if flat else "count_reject",
+            }
+        )
+        return flat
 
     async def _cancel_order(
         self,
@@ -1883,7 +1998,9 @@ class OMS:
         )
 
     def _perp_pos_from_store(self, positions_store) -> Optional[float]:
-        rows = list(positions_store.find())
+        return self._perp_pos_from_rows(list(positions_store.find()))
+
+    def _perp_pos_from_rows(self, rows: list[dict]) -> Optional[float]:
         if not rows:
             return None
         symbol = self._config.symbols.perp.symbol

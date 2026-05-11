@@ -2140,3 +2140,35 @@ ec1b00a  chore: bulk update after lint & format
 ### 未確定点
 - 追加ログの live 実運用での実出力確認は未実施。
 - live 起動、注文、決済、キャンセル、`config.yaml` 変更は未実施。
+
+---
+
+## 2026-05-12 live watch HALTED / stale internal perp_pos 修正
+
+### 観測事実
+- 対象 LOG_DIR: `runtime_logs\live_watch_monitor_identity_20260511_224417`
+- 30分監視で BOT は `HALTED`、latest internal は `pos_spot=0.0` / `pos_perp=0.02` / `delta=0.02`。
+- read-only 実口座確認では Futures position=0 / open orders=0 / SPOT dust のみ。
+- UNWIND fill と FLATTEN fill は `order_id` / `fill_id` / `client_oid` / `ts` が異なる別 fill で、dedupe 主因ではない。
+- positions sync の最後は `pos_perp=0.02`。その後 positions store が空になったが、internal `pos_perp` が 0 に更新されず stale に残った。
+- stale `pos_perp=0.02` により FLATTEN が繰り返され、reduce-only `22002 No position to close` が reject streak を進めた。
+
+### 推論
+- 主因は positions store empty を flat として同期できなかったこと。
+- futures fill accounting は `positions_sync_authoritative=true` で skip されており、fill 二重 apply が主因ではない可能性が高い。
+- UNWIND 注文/約定待ち中に `unhedged_exceeded` から FLATTEN が追加で走ったことも 22002 再発を増やした。
+
+### 実装
+- `bot/oms/oms.py`
+  - live かつ positions sync authoritative 済みで positions store が空なら、`positions_store_empty_assume_flat` として internal `perp_pos=0.0` に同期する。
+  - `positions_monitor_heartbeat` に `positions_empty` を追加。
+  - FLATTEN / UNWIND の reduce-only order が `22002` を返した場合、先に futures position sync を行い、flat 確認できた場合は `reduce_only_no_position_sync_flat` として reject streak に積まない。
+  - UNWIND order 成功後に短時間の pending window を持つ。
+- `bot/strategy/mm_funding.py`
+  - UNWIND pending 中の `unhedged_exceeded` は `unhedged_exceeded_deferred_for_unwind_pending` として active quote cancel のみ行い、追加 FLATTEN を出さない。
+- `tests/test_hedge_ticket_flatten_race.py`
+  - positions store empty assume flat、reduce-only 22002 sync flat、UNWIND pending 中の FLATTEN defer のテストを追加。
+
+### 未確定点
+- live 起動、実ポジション操作、注文、決済、キャンセル、`config.yaml` 変更は未実施。
+- 修正後の live bounded 検証は未実施。

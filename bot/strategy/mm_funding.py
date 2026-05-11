@@ -590,6 +590,37 @@ class MMFundingStrategy:
         unhedged_notional = abs(self._oms.unhedged_qty) * mid_spot
         if self._risk.unhedged_exceeded(unhedged_notional, self._oms.unhedged_since):
             hedge_ticket = self._oms.open_hedge_ticket_snapshot(now=now)
+            defer_for_unwind = getattr(
+                self._oms,
+                "should_defer_flatten_for_unwind_pending",
+                lambda now=None: False,
+            )
+            if defer_for_unwind(now=now):
+                self._state = StrategyState.HEDGING
+                await self._oms.cancel_all(reason="unhedged_exceeded_deferred_for_unwind_pending")
+                self._log_unhedged_exceeded(
+                    now=now,
+                    unhedged_notional=unhedged_notional,
+                    hedge_ticket=hedge_ticket,
+                    action_taken="defer_flatten_cancel_quotes",
+                    reason="unhedged_exceeded_deferred_for_unwind_pending",
+                    spot_pos=spot_pos,
+                    perp_pos=perp_pos,
+                    delta=delta,
+                )
+                self._log_decision(
+                    now,
+                    spot_bbo,
+                    perp_bbo,
+                    funding.funding_rate,
+                    basis,
+                    obi_spot,
+                    obi_perp,
+                    target_q,
+                    "unhedged_exceeded_deferred_for_unwind_pending",
+                    tfi,
+                )
+                return
             if self._oms.should_defer_flatten_for_hedge_ticket(now=now):
                 self._state = StrategyState.HEDGING
                 await self._oms.cancel_all(reason="unhedged_exceeded_deferred_for_hedge_ticket")

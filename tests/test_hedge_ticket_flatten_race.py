@@ -15,8 +15,9 @@ from bot.config import (
     SymbolsConfig,
 )
 from bot.oms.oms import HedgeTicket, OMS
+from bot.risk.guards import RiskGuards
 from bot.strategy.mm_funding import MMFundingStrategy
-from bot.types import FundingInfo, InstType, OrderRequest, Side
+from bot.types import Force, FundingInfo, InstType, OrderIntent, OrderRequest, OrderType, Side
 
 
 class CapturingLogger:
@@ -42,7 +43,7 @@ class DummyRisk:
 
 
 class StrategyOMS:
-    def __init__(self, *, defer_flatten: bool) -> None:
+    def __init__(self, *, defer_flatten: bool, unwind_pending: bool = False) -> None:
         self.gateway = SimpleNamespace(
             book_ready=True,
             public_book_channel="books5",
@@ -58,6 +59,7 @@ class StrategyOMS:
         self.flatten_calls: list[dict] = []
         self.update_quote_calls: list[dict] = []
         self._defer_flatten = defer_flatten
+        self._unwind_pending = unwind_pending
         deadline = time.time() + (10.0 if defer_flatten else -1.0)
         self._ticket = SimpleNamespace(
             ticket_id="ticket-1",
@@ -84,6 +86,9 @@ class StrategyOMS:
 
     def should_defer_flatten_for_hedge_ticket(self, now: float | None = None) -> bool:
         return self._defer_flatten
+
+    def should_defer_flatten_for_unwind_pending(self, now: float | None = None) -> bool:
+        return self._unwind_pending
 
     async def update_quotes(self, **kwargs) -> None:
         self.update_quote_calls.append(kwargs)
@@ -118,11 +123,18 @@ class DummyInstrumentConstraints:
 
 
 class OMSGateway:
-    def __init__(self, *, spot_available: float | None = None, position_rows: list[dict] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        spot_available: float | None = None,
+        position_rows: list[dict] | None = None,
+        place_order_response: dict | None = None,
+    ) -> None:
         self.constraints = DummyConstraintsManager()
         self.orders: list[OrderRequest] = []
         self.spot_available = spot_available
         self.store = SimpleNamespace(positions=SimpleNamespace(find=lambda: position_rows or []))
+        self.place_order_response = place_order_response or {"code": "00000", "data": {"orderId": "order-1"}}
 
     async def get_spot_available_balance(self, base_coin: str) -> float | None:
         assert base_coin == "ETH"
@@ -130,7 +142,7 @@ class OMSGateway:
 
     async def place_order(self, req: OrderRequest) -> dict:
         self.orders.append(req)
-        return {"code": "00000", "data": {"orderId": "order-1"}}
+        return self.place_order_response
 
 
 def _config() -> AppConfig:
@@ -249,6 +261,22 @@ def test_unhedged_exceeded_flattens_after_hedge_deadline(monkeypatch) -> None:
     assert risks
     assert risks[-1]["has_open_hedge_ticket"] is True
     assert risks[-1]["action_taken"] == "flatten"
+
+
+def test_unhedged_exceeded_defers_flatten_while_unwind_pending(monkeypatch) -> None:
+    oms = StrategyOMS(defer_flatten=False, unwind_pending=True)
+    logger = _run_strategy_step(monkeypatch, oms)
+
+    assert oms.flatten_calls == []
+    assert oms.cancel_reasons == ["unhedged_exceeded_deferred_for_unwind_pending"]
+    risks = [
+        record
+        for record in logger.records
+        if record.get("reason") == "unhedged_exceeded_deferred_for_unwind_pending"
+        and record.get("event") == "risk"
+    ]
+    assert risks
+    assert risks[-1]["action_taken"] == "defer_flatten_cancel_quotes"
 
 
 def test_flatten_fails_open_hedge_ticket_and_stops_chase() -> None:
@@ -387,3 +415,78 @@ def test_flatten_skips_futures_order_when_position_sync_reports_flat() -> None:
     assert skips
     assert skips[-1]["positions_sync_authoritative"] is True
     assert skips[-1]["action_taken"] == "skip_flatten"
+
+
+def test_positions_store_empty_assumes_flat_when_authoritative() -> None:
+    gateway = OMSGateway(position_rows=[])
+    orders_logger = CapturingLogger()
+    oms = OMS(
+        gateway,
+        _config(),
+        risk=None,
+        orders_logger=orders_logger,
+        fills_logger=CapturingLogger(),
+    )
+    oms.positions.perp_pos = 0.02
+    oms._positions_sync_authoritative = True
+
+    asyncio.run(oms._sync_positions_once(timeout_sec=0.0))
+
+    assert oms.positions.perp_pos == 0.0
+    logs = [
+        record
+        for record in orders_logger.records
+        if record.get("reason") == "positions_store_empty_assume_flat"
+    ]
+    assert logs
+    assert logs[-1]["old_perp_pos"] == 0.02
+    assert logs[-1]["new_perp_pos"] == 0.0
+    assert logs[-1]["positions_empty"] is True
+
+
+def test_reduce_only_22002_syncs_flat_without_reject_streak() -> None:
+    gateway = OMSGateway(
+        position_rows=[],
+        place_order_response={"code": "22002", "msg": "No position to close"},
+    )
+    orders_logger = CapturingLogger()
+    risk = RiskGuards(_config().risk)
+    oms = OMS(
+        gateway,
+        _config(),
+        risk=risk,
+        orders_logger=orders_logger,
+        fills_logger=CapturingLogger(),
+    )
+    oms.positions.perp_pos = 0.02
+    oms._positions_sync_authoritative = True
+
+    asyncio.run(
+        oms._submit_order(
+            OrderRequest(
+                inst_type=InstType.USDT_FUTURES,
+                symbol="ETHUSDT",
+                side=Side.SELL,
+                order_type=OrderType.MARKET,
+                size=0.02,
+                force=Force.IOC,
+                client_oid="FLATTEN-test",
+                intent=OrderIntent.FLATTEN,
+                cycle_id=1,
+                reduce_only=True,
+            ),
+            reason="unhedged_exceeded",
+        )
+    )
+
+    assert oms.positions.perp_pos == 0.0
+    assert risk.reject_streak == 0
+    assert risk.is_halted() is False
+    assert [
+        record for record in orders_logger.records if record.get("reason") == "order_reject"
+    ] == []
+    assert [
+        record
+        for record in orders_logger.records
+        if record.get("reason") == "reduce_only_no_position_sync_flat"
+    ]
