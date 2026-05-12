@@ -2172,3 +2172,42 @@ ec1b00a  chore: bulk update after lint & format
 ### 未確定点
 - live 起動、実ポジション操作、注文、決済、キャンセル、`config.yaml` 変更は未実施。
 - 修正後の live bounded 検証は未実施。
+
+---
+
+## 2026-05-12 stop_bot stale pid / graceful stop 修正
+
+### 観測事実
+- `runtime_logs\live_watch_after_flat_sync_fix_20260512_193959` の起動直後チェックは正常。
+- 起動直後ログでは `runtime_log_dir_identity=1`、`startup_cancel_all_done=1`、`HALTED=0`、`order_reject=0`、`fill_parse_warning=0`、`book_rx_rate=1`、`fill_monitor_heartbeat=2`、`positions_monitor_heartbeat=2`、`state=QUOTING`、`delta=0.0`。
+- `scripts\stop_bot.ps1` は `logs\bot.pid` の古い PID を参照し、実行中の `bot.app` を通常停止できなかった。
+- 手動でプロセスツリーを停止したため `shutdown_cancel_all_done` が出ず、Futures quote 2本が残留した。
+- 残留 quote 2本は手動キャンセル済み。停止後 read-only では SPOT open orders=0 / Futures open orders=0 / Futures ETHUSDT position=0.0 / SPOT ETH は dust のみ。
+
+### 推論
+- 旧 `stop_bot.ps1` は stale pid file に弱く、pid file が実 bot process を指していない場合に fallback 検出できなかった。
+- 強制停止に落ちると `bot.app` の shutdown path に入らず、`shutdown_cancel_all` が走らないため quote 残留リスクがある。
+
+### 実装
+- `scripts/stop_bot.ps1`
+  - stale pid file 判定を追加: PID 不在、PID が `bot.app` でない、wrapper/cmd 配下に `bot.app` がいない場合に `stale_pid_file` を出力。
+  - pid file に頼らず `python -m bot.app --config config.yaml` を CommandLine から fallback 検出。
+  - `CTRL_BREAK_EVENT` 送信を優先し、`shutdown_cancel_all_done` をログから確認してから終了判定。
+  - graceful timeout 時のみ `Stop-Process -Force` に落とし、`forced_stop_used=true` を明示。
+  - `-DryRun` を追加し、停止操作なしで検出と出力を確認可能にした。
+- `scripts/run_real_logs.ps1`
+  - 起動時に stale pid file を判定して上書き可能にした。
+  - wrapper/cmd の PID ではなく、子孫の実 `python -m bot.app --config config.yaml` PID を `logs\bot.pid` に保存。
+  - `logs\bot.run.json` と run meta に `run_id` / `log_dir` / `git_sha` / `config_path` / `dry_run` / `bot_mode` / `bot_pid` を保存。
+- `tests/test_stop_bot_scripts.py`
+  - stale pid / fallback 検出、graceful 優先、pid metadata 記録の静的テストを追加。
+
+### 検証
+- PowerShell 構文チェック: `scripts\stop_bot.ps1` pass。
+- PowerShell 構文チェック: `scripts\run_real_logs.ps1` pass。
+- `scripts\stop_bot.ps1 -DryRun -GracefulWaitSec 1`: pass。実停止なし、注文/キャンセルなし。
+- `scripts\run_real_logs.ps1` smoke: `DRY_RUN=1` かつ `REAL_LOG_CMD='cmd /c echo smoke_ok'` で pass。live 起動なし、注文/キャンセルなし。
+
+### 未確定点
+- 実 live 常駐プロセスに対する `CTRL_BREAK_EVENT` 経由の graceful shutdown 実地確認は未実施。
+- 本修正後の live 起動、注文、決済、キャンセル、`config.yaml` 変更は未実施。
