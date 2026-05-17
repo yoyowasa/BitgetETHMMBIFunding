@@ -2211,3 +2211,62 @@ ec1b00a  chore: bulk update after lint & format
 ### 未確定点
 - 実 live 常駐プロセスに対する `CTRL_BREAK_EVENT` 経由の graceful shutdown 実地確認は未実施。
 - 本修正後の live 起動、注文、決済、キャンセル、`config.yaml` 変更は未実施。
+
+---
+
+## 2026-05-17 収益改善設定 / live profitability 分析追加
+
+### 観測事実
+- 対象ログ: `runtime_logs\live_watch_after_stop_pid_fix_20260512_202042`
+- 稼働時間は約 47.96 時間。
+- 約定は 15 件: `USDT-FUTURES:QUOTE_BID=6` / `USDT-FUTURES:QUOTE_ASK=1` / `USDT-FUTURES:UNWIND=6` / `SPOT:HEDGE=2`。
+- `order_reject=0`、`resp_code 22002=0`、`fill_parse_warning=0`。
+- 実口座 read-only では売却後に SPOT open orders=0 / Futures open orders=0 / Futures position=0.0 / SPOT ETH available=0.000480000718 / SPOT ETH frozen=0.0。
+- 旧設定 `base_half_spread_bps=14.0` / `min_half_spread_bps=14.0` では pre quote の `expected_edge_bps` が概ね 0.2bps と薄い。
+- ログ上 `tfi_fade_suppressed` が多く、`tfi_fade_policy=disabled` により強い flow 方向の fade が抑制されていた。
+
+### 推論
+- spot taker fee 10bps と UNWIND の market/reduce-only 手数料・滑りを考慮すると、0.2bps 程度の expected edge では薄すぎる。
+- QUOTE_BID 後に UNWIND で不利価格になるケースが複数あり、強い TFI 方向では quote を遠ざける方が期待損失を下げやすい。
+- fill / pnl の再集計を継続的に再現できる分析スクリプトが必要。
+
+### 実装
+- `config.yaml`
+  - `base_half_spread_bps`: 14.0 -> 18.0
+  - `min_half_spread_bps`: 14.0 -> 18.0
+  - `tfi_fade_policy`: `disabled` -> `threshold_0p7`
+- `scripts/analyze_live_profitability.py`
+  - gzip 済みローテーションログを含め、event/reason/block/fill/pnl を集計。
+  - quote fill と直後の HEDGE/UNWIND を粗くペアリングし、既知 USDT fee 込みの rough net を算出。
+- `tests/test_analyze_live_profitability.py`
+  - QUOTE_BID -> UNWIND のペアリングと fee 込み rough net のテストを追加。
+
+### 検証
+- `scripts/analyze_live_profitability.py runtime_logs\live_watch_after_stop_pid_fix_20260512_202042`: pass。
+- `pytest tests/test_analyze_live_profitability.py tests/test_tfi_fade_policy.py tests/test_pnl_logger.py`: 8 passed。
+
+### 未確定点
+- 18bps / `threshold_0p7` 設定での DRY bounded / live bounded 検証は未実施。
+- 本変更後の live 起動、注文、決済、キャンセルは未実施。
+
+---
+
+## 2026-05-17 18bps / TFI fade DRY bounded 5分
+
+### 観測事実
+- 対象ログ: `runtime_logs\dry_profit_config_18bps_tfi_20260517_203631`
+- `DRY_RUN=1` / `BOT_MODE=dry` / duration 300秒で完走。
+- `HALTED=0`、`order_reject=0`、`fill_parse_warning=0`、`startup_open_spot_balance_detected=0`。
+- `shutdown_cancel_all_done=1`、`shutdown_cancel_all_failed=0`。
+- `book_rx_rate=4`、`fill_monitor_heartbeat=5`、`positions_monitor_heartbeat=5`。
+- `positions_monitor_heartbeat` に `positions_empty=true` が出力された。
+- `pre_quote_decision` に `base_half_spread_bps=18.0` / `min_half_spread_bps=18.0` が出力された。
+- `tfi_fade_suppressed` に `tfi_fade_policy=threshold_0p7` が出力された。
+- 対象 repo の `python -m bot.app` 残存プロセスはなし。
+
+### 推論
+- 18bps / `threshold_0p7` 設定は DRY 起動・終了 path では破綻していない。
+
+### 未確定点
+- 同設定での live bounded 検証は未実施。
+- 実約定時の HEDGE / UNWIND / FLATTEN path は未確認。
