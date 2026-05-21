@@ -859,6 +859,38 @@ class MMFundingStrategy:
         elif perp_pos < target_perp:
             size_bid *= 1.2
 
+        spot_hedge_sell_available = None
+        spot_hedge_sell_required = None
+        spot_hedge_sell_available_block = False
+        if size_bid > 0:
+            spot_hedge_sell_required = self._quote_size_after_constraints(size_bid)
+            if spot_hedge_sell_required > 0:
+                getter = getattr(self._oms, "spot_available_for_quote", None)
+                if getter is not None:
+                    spot_hedge_sell_available = await getter()
+                if (
+                    spot_hedge_sell_available is not None
+                    and spot_hedge_sell_available + 1e-12 < spot_hedge_sell_required
+                ):
+                    size_bid = 0.0
+                    spot_hedge_sell_available_block = True
+                    self._decision_logger.log(
+                        {
+                            "ts": now,
+                            "event": "risk",
+                            "intent": "quote",
+                            "source": "strategy",
+                            "mode": self._state.value,
+                            "reason": "spot_hedge_sell_available_block",
+                            "leg": "bid",
+                            "cycle_id": self._cycle_id,
+                            "spot_available": spot_hedge_sell_available,
+                            "required_size": spot_hedge_sell_required,
+                            "base_coin": self._config.symbols.spot.symbol.replace("USDT", ""),
+                            "action": "suppress_bid_quote",
+                        }
+                    )
+
         one_sided_policy = self._config.strategy.one_sided_quote_policy
         suppress_bid, suppress_ask = self._one_sided_quote_suppression(
             one_sided_policy, tfi
@@ -894,6 +926,8 @@ class MMFundingStrategy:
             final_block_reason=(
                 "one_sided_quote_suppressed"
                 if size_bid <= 0 and size_ask <= 0
+                else "spot_hedge_sell_available_block"
+                if spot_hedge_sell_available_block
                 else "none"
             ),
             expected_edge_fields={
@@ -912,6 +946,9 @@ class MMFundingStrategy:
             one_sided_suppressed_ask=suppress_ask,
             final_should_quote_bid=size_bid > 0,
             final_should_quote_ask=size_ask > 0,
+            spot_hedge_sell_available=spot_hedge_sell_available,
+            spot_hedge_sell_required=spot_hedge_sell_required,
+            spot_hedge_sell_available_block=spot_hedge_sell_available_block,
         )
         await self._oms.update_quotes(
             bid_px=bid_px,
@@ -1066,6 +1103,15 @@ class MMFundingStrategy:
             "adverse_buffer_bps": adverse_buffer_bps,
         }
 
+    def _quote_size_after_constraints(self, size: float) -> float:
+        constraints_registry = getattr(self._oms.gateway, "constraints", None)
+        if constraints_registry is None:
+            return max(size, 0.0)
+        constraints = constraints_registry.get(InstType.USDT_FUTURES)
+        if constraints is None or not constraints.is_ready():
+            return max(size, 0.0)
+        return max(constraints.adjust_qty(size), 0.0)
+
     @staticmethod
     def _mid_move_bps(mid_now: float, mid_prev: float | None) -> float | None:
         if mid_prev is None or mid_prev <= 0:
@@ -1118,6 +1164,9 @@ class MMFundingStrategy:
         final_should_quote_ask: bool,
         cancel_aggressive_scope_suppressed: bool = False,
         cancel_aggressive_quality_suppressed: bool = False,
+        spot_hedge_sell_available: float | None = None,
+        spot_hedge_sell_required: float | None = None,
+        spot_hedge_sell_available_block: bool = False,
     ) -> None:
         active_quotes = self._active_quote_snapshot()
         final_should_quote_any = final_should_quote_bid or final_should_quote_ask
@@ -1162,6 +1211,9 @@ class MMFundingStrategy:
                 "tfi_fade_triggered": tfi_fade_triggered,
                 "one_sided_suppressed_bid": one_sided_suppressed_bid,
                 "one_sided_suppressed_ask": one_sided_suppressed_ask,
+                "spot_hedge_sell_available": spot_hedge_sell_available,
+                "spot_hedge_sell_required": spot_hedge_sell_required,
+                "spot_hedge_sell_available_block": spot_hedge_sell_available_block,
                 "final_should_quote_bid": final_should_quote_bid,
                 "final_should_quote_ask": final_should_quote_ask,
                 "final_should_quote_any": final_should_quote_any,

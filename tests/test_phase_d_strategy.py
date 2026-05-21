@@ -8,6 +8,21 @@ from bot.strategy.mm_funding import MMFundingStrategy
 from bot.types import FundingInfo, InstType
 
 
+class DummyConstraints:
+    min_qty = 0.0001
+
+    def is_ready(self) -> bool:
+        return True
+
+    def adjust_qty(self, qty: float) -> float:
+        return qty
+
+
+class DummyConstraintsManager:
+    def get(self, inst_type: InstType):
+        return DummyConstraints()
+
+
 class DummyLogger:
     def __init__(self) -> None:
         self.records: list[dict] = []
@@ -17,7 +32,7 @@ class DummyLogger:
 
 
 class DummyOMS:
-    def __init__(self) -> None:
+    def __init__(self, *, spot_available: float | None = None) -> None:
         self.gateway = SimpleNamespace(
             book_ready=True,
             public_book_channel="books5",
@@ -25,6 +40,7 @@ class DummyOMS:
             tfi=0.8,
             last_public_trade=None,
             mid_100ms_ago=lambda now=None: None,
+            constraints=DummyConstraintsManager(),
         )
         self.positions = SimpleNamespace(spot_pos=0.0, perp_pos=0.0)
         self.unhedged_qty = 0.0
@@ -32,6 +48,7 @@ class DummyOMS:
         self.last_update_quotes: dict | None = None
         self.cancel_reasons: list[str] = []
         self.flatten_calls: list[dict] = []
+        self.spot_available = spot_available
 
     async def process_hedge_tickets(self, spot_bbo) -> None:
         return None
@@ -49,6 +66,9 @@ class DummyOMS:
 
     async def update_quotes(self, **kwargs) -> None:
         self.last_update_quotes = kwargs
+
+    async def spot_available_for_quote(self) -> float | None:
+        return self.spot_available
 
 
 class DummyRisk:
@@ -152,3 +172,32 @@ def test_funding_off_open_delta_logs_alert_without_flatten(monkeypatch) -> None:
     assert alerts[0]["perp_pos"] == 0.02
     assert alerts[0]["delta"] == 0.02
     assert alerts[0]["action"] == "alert_only"
+
+
+def test_spot_available_dust_suppresses_bid_quote(monkeypatch) -> None:
+    from bot.strategy import mm_funding as module
+
+    monkeypatch.setattr(module.book_md, "snapshot_from_store", _snapshot_from_store)
+    monkeypatch.setattr(module.book_md, "bbo_from_snapshot", lambda snapshot: SimpleNamespace(bid=snapshot.bids[0][0], ask=snapshot.asks[0][0], bid_size=snapshot.bids[0][1], ask_size=snapshot.asks[0][1], ts=snapshot.ts))
+    monkeypatch.setattr(module.book_md, "calc_mid", lambda bbo: (bbo.bid + bbo.ask) / 2.0)
+    monkeypatch.setattr(module.book_md, "calc_microprice", lambda bbo: (bbo.ask * bbo.bid_size + bbo.bid * bbo.ask_size) / (bbo.bid_size + bbo.ask_size))
+    monkeypatch.setattr(module.book_md, "calc_obi", lambda snapshot: 0.0)
+
+    funding_cache = SimpleNamespace(last=FundingInfo(funding_rate=0.01, next_update_time=None, interval_sec=None, ts=time.time()))
+    oms = DummyOMS(spot_available=0.00042)
+    logger = DummyLogger()
+    strategy = MMFundingStrategy(_config(), funding_cache, oms, DummyRisk(), logger)
+
+    import asyncio
+    asyncio.run(strategy.step())
+
+    assert oms.last_update_quotes is not None
+    assert oms.last_update_quotes["bid_size"] == 0.0
+    assert oms.last_update_quotes["ask_size"] > 0.0
+    blocks = [r for r in logger.records if r.get("reason") == "spot_hedge_sell_available_block"]
+    assert blocks
+    pre_quote = [r for r in logger.records if r.get("reason") == "pre_quote_decision"]
+    assert pre_quote[-1]["final_should_quote_bid"] is False
+    assert pre_quote[-1]["final_should_quote_ask"] is True
+    assert pre_quote[-1]["spot_hedge_sell_available"] == 0.00042
+    assert pre_quote[-1]["spot_hedge_sell_available_block"] is True

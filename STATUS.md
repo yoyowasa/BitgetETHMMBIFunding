@@ -2270,3 +2270,42 @@ ec1b00a  chore: bulk update after lint & format
 ### 未確定点
 - 同設定での live bounded 検証は未実施。
 - 実約定時の HEDGE / UNWIND / FLATTEN path は未確認。
+
+---
+
+## 2026-05-21 SPOT hedge 価格整形 / BID quote 残高ガード
+
+### 観測事実
+- `runtime_logs\live_watch_18bps_tfi_20260518_233747` は停止済み。現在の実口座 read-only は SPOT open orders=0 / Futures open orders=0 / Futures ETHUSDT position=0.0 / SPOT ETH available=0.000420000718 / SPOT ETH frozen=0.0。
+- 同ログでは `HALTED=0`、`fill_parse_warning=0`、`shutdown_cancel_all_done=1`、`resp_code_22002=0`。
+- 実約定は 10 件: `QUOTE_BID=3` / `QUOTE_ASK=2` / `SPOT:HEDGE=4` / `UNWIND=1`。
+- `order_reject=38`、`max_reject_streak=2`。内訳は `41103=1`、`45001=37`。
+- `41103` は SPOT HEDGE chase の `price=2105.2400000000002` / `price_payload=null` / `response_msg=param price scale error error` で発生。
+- 前回 12時間 run では SPOT available dust 状態で futures BID が約定し、SPOT SELL hedge が `spot_hedge_insufficient_available_precheck` で失敗して UNWIND 損切りになった。
+
+### 推論
+- SPOT HEDGE / chase 注文も PERP と同様に Decimal tick 整形済み price payload を使う必要がある。
+- SPOT available が futures BID 約定後の SELL hedge 必要量未満なら、BID quote を出すべきではない。
+
+### 実装
+- `bot/exchange/constraints.py`
+  - `quantize_price_floor` を追加し、SPOT 価格を従来の floor 方針のまま Decimal tick に合わせる。
+- `bot/exchange/bitget_gateway.py`
+  - SPOT order REST payload の `price` を `format_price_for_bitget` 済み文字列に変更。
+- `bot/oms/oms.py`
+  - `_submit_order` の SPOT `price_payload` を記録。
+  - quote 判定用の SPOT available cache `spot_available_for_quote` を追加。
+- `bot/strategy/mm_funding.py`
+  - futures BID quote 前に SPOT available を確認し、必要 hedge sell size 未満なら `spot_hedge_sell_available_block` として BID を抑制。
+- `tests/test_hedge_ticket_flatten_race.py`
+  - SPOT hedge の `price_payload=2105.24` と gateway REST payload 整形を追加検証。
+- `tests/test_phase_d_strategy.py`
+  - SPOT dust 時に BID quote だけ suppress され、ASK は維持される検証を追加。
+
+### 検証
+- `pytest tests/test_hedge_ticket_flatten_race.py tests/test_phase_d_strategy.py tests/test_perp_price_rounding.py`: 16 passed。
+- `pytest`: 94 passed。
+
+### 未確定点
+- 修正後の live 24時間 forward は未実施。
+- `45001 Unknown error` の根本原因は未確定。

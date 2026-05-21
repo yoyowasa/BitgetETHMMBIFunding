@@ -14,6 +14,7 @@ from ..exchange.constraints import (
     InstrumentConstraints,
     format_price_for_bitget,
     get_price_tick,
+    quantize_price_floor,
     quantize_perp_price,
 )
 from ..log.jsonl import JsonlLogger
@@ -146,6 +147,8 @@ class OMS:
         self._last_positions_monitor_exception: str | None = None
         self._last_positions_empty = False
         self._unwind_pending_until = 0.0
+        self._spot_available_quote_cache_ts = 0.0
+        self._spot_available_quote_cache_value: float | None = None
 
     @property
     def positions(self) -> PositionTracker:
@@ -230,6 +233,21 @@ class OMS:
     def should_defer_flatten_for_unwind_pending(self, now: float | None = None) -> bool:
         now_ts = time.time() if now is None else now
         return now_ts < self._unwind_pending_until
+
+    async def spot_available_for_quote(self, ttl_sec: float = 10.0) -> Optional[float]:
+        now = time.time()
+        if (
+            self._spot_available_quote_cache_value is not None
+            and now - self._spot_available_quote_cache_ts < ttl_sec
+        ):
+            return self._spot_available_quote_cache_value
+        base_coin = self._spot_base_coin()
+        available = self._spot_available_balance(base_coin)
+        if available is None:
+            available = await self._get_spot_available_balance(base_coin)
+        self._spot_available_quote_cache_value = available
+        self._spot_available_quote_cache_ts = now
+        return available
 
     def drain_quote_metrics(self) -> QuoteMetrics:
         metrics = QuoteMetrics(
@@ -1121,7 +1139,10 @@ class OMS:
                 price_payload = format_price_for_bitget(rounded)
                 req.price = float(rounded)
             else:
-                req.price = constraints.adjust_price(req.price)
+                rounded = quantize_price_floor(req.price, constraints)
+                price_tick = format_price_for_bitget(get_price_tick(constraints))
+                price_payload = format_price_for_bitget(rounded)
+                req.price = float(rounded)
         req.size = constraints.adjust_qty(req.size)
         if req.size < constraints.min_qty:
             self._orders_logger.log(

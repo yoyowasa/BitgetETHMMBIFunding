@@ -17,6 +17,7 @@ from .constraints import (
     ConstraintsRegistry,
     InstrumentConstraints,
     format_price_for_bitget,
+    quantize_price_floor,
     quantize_perp_price,
 )
 
@@ -296,6 +297,10 @@ class BitgetGateway:
 
     async def place_order(self, req: OrderRequest) -> dict:
         if req.inst_type == InstType.SPOT:
+            constraints = self.constraints.get(InstType.SPOT)
+            rounded_price = None
+            if req.price is not None and constraints is not None and constraints.is_ready():
+                rounded_price = quantize_price_floor(req.price, constraints)
             data = {
                 "symbol": req.symbol,
                 "side": req.side.value,
@@ -303,7 +308,9 @@ class BitgetGateway:
                 "size": str(req.size),
                 "clientOid": req.client_oid,
             }
-            if req.price is not None:
+            if rounded_price is not None:
+                data["price"] = format_price_for_bitget(rounded_price)
+            elif req.price is not None:
                 data["price"] = str(req.price)
             if req.force is not None:
                 data["force"] = req.force.value

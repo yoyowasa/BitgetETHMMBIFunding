@@ -60,6 +60,19 @@ def quantize_perp_price(
     return units * tick
 
 
+def quantize_price_floor(
+    price: float | Decimal | str,
+    constraints: InstrumentConstraints,
+) -> Decimal:
+    # 役割: SPOT 価格を従来の floor 方針のまま Decimal で tick に合わせる
+    tick = get_price_tick(constraints)
+    if tick <= 0:
+        return Decimal(str(price))
+    raw = Decimal(str(price))
+    units = (raw / tick).to_integral_value(rounding=ROUND_FLOOR)
+    return units * tick
+
+
 def format_price_for_bitget(price: Decimal) -> str:
     # 役割: Decimal を Bitget REST payload 用の文字列に変換する関数
     return format(price.normalize(), "f")
