@@ -2309,3 +2309,44 @@ ec1b00a  chore: bulk update after lint & format
 ### 未確定点
 - 修正後の live 24時間 forward は未実施。
 - `45001 Unknown error` の根本原因は未確定。
+
+---
+
+## 2026-05-25 live 24h 後確認 / SPOT 残数クリア / flatten race P1 修正
+
+### 観測事実
+- 対象ログ: `runtime_logs\live_forward_spot_guard_24h_20260523_121024`
+- 24h bounded run は停止済み。`bot.app` 残存プロセスなし。
+- `shutdown_cancel_all_done=1`、`shutdown_cancel_all_failed=0`、`forced_stop_used=0`。
+- `HALTED=0`、`fill_parse_warning=0`、`resp_code 22002=0`。
+- `order_reject=5`。全件 `SPOT FLATTEN sell` の `40808 size checkBDScale`。
+- fill 時系列では `05:44:43 QUOTE_ASK sell futures 0.02` 後、`05:44:44 FLATTEN buy futures 0.06` が先行し、`05:44:54 SPOT HEDGE buy 0.02` が遅れて約定。
+- 終端内部状態は `spot_pos=0.059899999999999995` / `perp_pos=0.0` / `delta=0.059899999999999995`。
+- read-only 実口座確認では SPOT open orders=0 / Futures open orders=0 / Futures position=0 / SPOT ETH available=0.060300000718 / frozen=0。
+- 手動残数クリア: SPOT market sell `0.0603`、orderId `1442720056529858561`、response `00000`。
+- クリア後 read-only: SPOT open orders=0 / Futures open orders=0 / Futures position=0 / SPOT ETH available=0.000000000718 / frozen=0。
+
+### 推論
+- 未完了 `HEDGE` pending 中に `FLATTEN` が走り、futures 側だけ先に 0 へ戻した後、遅延 SPOT HEDGE が約定して SPOT 単独残りになった。
+- SPOT FLATTEN size が `0.039900000000000005` の raw float 文字列で送信され、Bitget の size precision 制約で reject された。
+
+### 実装
+- `bot/exchange/constraints.py`
+  - `quantize_size_floor` / `format_size_for_bitget` を追加。
+- `bot/exchange/bitget_gateway.py`
+  - SPOT / Futures order payload の `size` を constraints の `qty_step` に floor quantize して送信。
+- `bot/oms/oms.py`
+  - 未期限 `HEDGE` ticket または `UNWIND pending` 中の `flatten` を OMS 内でも defer。
+  - defer 時は quote cancel のみ実行し、`flatten_deferred_for_hedge_ticket` / `flatten_deferred_for_unwind_pending` を記録。
+- `tests/test_perp_price_rounding.py`
+  - size quantize / payload 検証を追加。
+- `tests/test_hedge_ticket_flatten_race.py`
+  - direct `OMS.flatten` が hedge pending 中に注文せず defer する検証を追加。
+
+### 検証
+- `pytest tests\test_perp_price_rounding.py tests\test_hedge_ticket_flatten_race.py tests\test_spot_balance_precheck.py`: 21 passed。
+- `pytest`: 98 passed。
+- 修正後 read-only: SPOT open orders=0 / Futures open orders=0 / Futures position=0 / SPOT ETH available=0.000000000718 / frozen=0。
+
+### 未確定点
+- 修正後の DRY / live bounded forward は未実施。

@@ -330,6 +330,47 @@ def test_flatten_fails_open_hedge_ticket_and_stops_chase() -> None:
     ] == []
 
 
+def test_flatten_defers_while_hedge_ticket_pending() -> None:
+    gateway = OMSGateway()
+    orders_logger = CapturingLogger()
+    oms = OMS(
+        gateway,
+        _config(),
+        risk=None,
+        orders_logger=orders_logger,
+        fills_logger=CapturingLogger(),
+    )
+    now = time.time()
+    oms.positions.spot_pos = 0.04
+    oms.positions.perp_pos = -0.04
+    oms._hedge_tickets["ticket-1"] = HedgeTicket(
+        ticket_id="ticket-1",
+        symbol="ETHUSDT",
+        side=Side.BUY,
+        want_qty=0.02,
+        filled_qty=0.0,
+        created_ts=now,
+        deadline_ts=now + 5.0,
+        tries=1,
+        status="OPEN",
+        reason="perp_fill",
+        perp_fill_ts=now,
+        perp_fill_price=100.0,
+    )
+
+    asyncio.run(oms.flatten(None, cycle_id=11, reason="unhedged_exceeded"))
+
+    assert gateway.orders == []
+    assert oms.has_open_hedge_ticket() is True
+    risks = [
+        record
+        for record in orders_logger.records
+        if record.get("reason") == "flatten_deferred_for_hedge_ticket"
+    ]
+    assert risks
+    assert risks[-1]["action_taken"] == "defer_flatten_cancel_quotes"
+
+
 def test_spot_hedge_sell_available_precheck_unwinds_without_chase() -> None:
     gateway = OMSGateway(spot_available=0.0)
     orders_logger = CapturingLogger()

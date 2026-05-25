@@ -17,8 +17,10 @@ from .constraints import (
     ConstraintsRegistry,
     InstrumentConstraints,
     format_price_for_bitget,
+    format_size_for_bitget,
     quantize_price_floor,
     quantize_perp_price,
+    quantize_size_floor,
 )
 
 
@@ -299,13 +301,20 @@ class BitgetGateway:
         if req.inst_type == InstType.SPOT:
             constraints = self.constraints.get(InstType.SPOT)
             rounded_price = None
+            rounded_size = None
             if req.price is not None and constraints is not None and constraints.is_ready():
                 rounded_price = quantize_price_floor(req.price, constraints)
+            if constraints is not None and constraints.is_ready():
+                rounded_size = quantize_size_floor(req.size, constraints)
             data = {
                 "symbol": req.symbol,
                 "side": req.side.value,
                 "orderType": req.order_type.value,
-                "size": str(req.size),
+                "size": (
+                    format_size_for_bitget(rounded_size)
+                    if rounded_size is not None
+                    else str(req.size)
+                ),
                 "clientOid": req.client_oid,
             }
             if rounded_price is not None:
@@ -319,8 +328,11 @@ class BitgetGateway:
         if req.inst_type == InstType.USDT_FUTURES:
             constraints = self.constraints.get(InstType.USDT_FUTURES)
             rounded_price = None
+            rounded_size = None
             if req.price is not None and constraints is not None and constraints.is_ready():
                 rounded_price = quantize_perp_price(req.price, req.side, constraints)
+            if constraints is not None and constraints.is_ready():
+                rounded_size = quantize_size_floor(req.size, constraints)
             data = {
                 "symbol": req.symbol,
                 "productType": self.config.symbols.perp.productType,
@@ -328,7 +340,11 @@ class BitgetGateway:
                 "marginCoin": self.config.symbols.perp.marginCoin,
                 "side": req.side.value,
                 "orderType": req.order_type.value,
-                "size": str(req.size),
+                "size": (
+                    format_size_for_bitget(rounded_size)
+                    if rounded_size is not None
+                    else str(req.size)
+                ),
                 "clientOid": req.client_oid,
             }
             if rounded_price is not None:

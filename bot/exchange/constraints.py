@@ -45,6 +45,22 @@ def get_price_tick(constraints: InstrumentConstraints) -> Decimal:
     return Decimal(str(getattr(constraints, "tick_size", 0.0)))
 
 
+def get_qty_step(constraints: InstrumentConstraints) -> Decimal:
+    return Decimal(str(getattr(constraints, "qty_step", 0.0)))
+
+
+def quantize_size_floor(
+    size: float | Decimal | str,
+    constraints: InstrumentConstraints,
+) -> Decimal:
+    step = get_qty_step(constraints)
+    if step <= 0:
+        return Decimal(str(size))
+    raw = Decimal(str(size))
+    units = (raw / step).to_integral_value(rounding=ROUND_FLOOR)
+    return units * step
+
+
 def quantize_perp_price(
     price: float | Decimal | str,
     side: Side,
@@ -76,6 +92,10 @@ def quantize_price_floor(
 def format_price_for_bitget(price: Decimal) -> str:
     # 役割: Decimal を Bitget REST payload 用の文字列に変換する関数
     return format(price.normalize(), "f")
+
+
+def format_size_for_bitget(size: Decimal) -> str:
+    return format(size.normalize(), "f")
 
 
 @dataclass

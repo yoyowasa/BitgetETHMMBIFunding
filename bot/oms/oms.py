@@ -309,6 +309,41 @@ class OMS:
 
     async def flatten(self, spot_bbo: Optional[book_md.BBO], cycle_id: int, reason: str) -> None:
         async with self._get_symbol_lock(self._config.symbols.perp.symbol):
+            hedge_snapshot = self.open_hedge_ticket_snapshot()
+            defer_reason = None
+            if hedge_snapshot is not None and not hedge_snapshot.expired:
+                defer_reason = "flatten_deferred_for_hedge_ticket"
+            elif self.should_defer_flatten_for_unwind_pending():
+                defer_reason = "flatten_deferred_for_unwind_pending"
+            if defer_reason is not None:
+                await self._cancel_all_quotes_unlocked(reason=defer_reason)
+                self._orders_logger.log(
+                    {
+                        "event": "risk",
+                        "intent": OrderIntent.FLATTEN.value,
+                        "source": "oms",
+                        "mode": "RUN",
+                        "reason": defer_reason,
+                        "cycle_id": cycle_id,
+                        "trigger_reason": reason,
+                        "action_taken": "defer_flatten_cancel_quotes",
+                        "has_open_hedge_ticket": hedge_snapshot is not None,
+                        "hedge_ticket_id": None
+                        if hedge_snapshot is None
+                        else hedge_snapshot.ticket_id,
+                        "hedge_ticket_remain": None
+                        if hedge_snapshot is None
+                        else hedge_snapshot.remain,
+                        "hedge_ticket_deadline_ts": None
+                        if hedge_snapshot is None
+                        else hedge_snapshot.deadline_ts,
+                        "unwind_pending": self.should_defer_flatten_for_unwind_pending(),
+                        "spot_pos": self._positions.spot_pos,
+                        "perp_pos": self._positions.perp_pos,
+                        "delta": self._positions.spot_pos + self._positions.perp_pos,
+                    }
+                )
+                return
             self.fail_open_tickets("flatten_started")
             await self._cancel_all_quotes_unlocked(reason=reason)
             if not self._gateway.constraints.ready():
