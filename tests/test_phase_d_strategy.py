@@ -10,12 +10,13 @@ from bot.types import FundingInfo, InstType
 
 class DummyConstraints:
     min_qty = 0.0001
+    qty_step = 0.01
 
     def is_ready(self) -> bool:
         return True
 
     def adjust_qty(self, qty: float) -> float:
-        return qty
+        return int(qty / self.qty_step) * self.qty_step
 
 
 class DummyConstraintsManager:
@@ -201,3 +202,36 @@ def test_spot_available_dust_suppresses_bid_quote(monkeypatch) -> None:
     assert pre_quote[-1]["final_should_quote_ask"] is True
     assert pre_quote[-1]["spot_hedge_sell_available"] == 0.00042
     assert pre_quote[-1]["spot_hedge_sell_available_block"] is True
+
+
+def test_spot_available_fee_shortfall_reduces_bid_quote_size(monkeypatch) -> None:
+    from bot.strategy import mm_funding as module
+
+    monkeypatch.setattr(module.book_md, "snapshot_from_store", _snapshot_from_store)
+    monkeypatch.setattr(module.book_md, "bbo_from_snapshot", lambda snapshot: SimpleNamespace(bid=snapshot.bids[0][0], ask=snapshot.asks[0][0], bid_size=snapshot.bids[0][1], ask_size=snapshot.asks[0][1], ts=snapshot.ts))
+    monkeypatch.setattr(module.book_md, "calc_mid", lambda bbo: (bbo.bid + bbo.ask) / 2.0)
+    monkeypatch.setattr(module.book_md, "calc_microprice", lambda bbo: (bbo.ask * bbo.bid_size + bbo.bid * bbo.ask_size) / (bbo.bid_size + bbo.ask_size))
+    monkeypatch.setattr(module.book_md, "calc_obi", lambda snapshot: 0.0)
+
+    funding_cache = SimpleNamespace(last=FundingInfo(funding_rate=0.01, next_update_time=None, interval_sec=None, ts=time.time()))
+    oms = DummyOMS(spot_available=0.019980000718)
+    logger = DummyLogger()
+    strategy = MMFundingStrategy(_config(), funding_cache, oms, DummyRisk(), logger)
+
+    import asyncio
+    asyncio.run(strategy.step())
+
+    assert oms.last_update_quotes is not None
+    assert oms.last_update_quotes["bid_size"] == 0.01
+    assert oms.last_update_quotes["ask_size"] > 0.0
+    reductions = [
+        r for r in logger.records if r.get("reason") == "spot_hedge_sell_available_reduce"
+    ]
+    assert reductions
+    assert reductions[-1]["spot_available"] == 0.019980000718
+    assert reductions[-1]["required_size"] > reductions[-1]["spot_available"]
+    assert reductions[-1]["adjusted_size"] == 0.01
+    pre_quote = [r for r in logger.records if r.get("reason") == "pre_quote_decision"]
+    assert pre_quote[-1]["final_should_quote_bid"] is True
+    assert pre_quote[-1]["spot_hedge_sell_available_block"] is False
+    assert pre_quote[-1]["spot_hedge_sell_adjusted"] == 0.01

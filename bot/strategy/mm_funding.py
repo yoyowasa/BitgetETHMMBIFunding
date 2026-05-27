@@ -861,6 +861,7 @@ class MMFundingStrategy:
 
         spot_hedge_sell_available = None
         spot_hedge_sell_required = None
+        spot_hedge_sell_adjusted = None
         spot_hedge_sell_available_block = False
         if size_bid > 0:
             spot_hedge_sell_required = self._quote_size_after_constraints(size_bid)
@@ -872,24 +873,49 @@ class MMFundingStrategy:
                     spot_hedge_sell_available is not None
                     and spot_hedge_sell_available + 1e-12 < spot_hedge_sell_required
                 ):
-                    size_bid = 0.0
-                    spot_hedge_sell_available_block = True
-                    self._decision_logger.log(
-                        {
-                            "ts": now,
-                            "event": "risk",
-                            "intent": "quote",
-                            "source": "strategy",
-                            "mode": self._state.value,
-                            "reason": "spot_hedge_sell_available_block",
-                            "leg": "bid",
-                            "cycle_id": self._cycle_id,
-                            "spot_available": spot_hedge_sell_available,
-                            "required_size": spot_hedge_sell_required,
-                            "base_coin": self._config.symbols.spot.symbol.replace("USDT", ""),
-                            "action": "suppress_bid_quote",
-                        }
+                    adjusted_size = self._quote_size_after_constraints(
+                        spot_hedge_sell_available
                     )
+                    if adjusted_size > 0 and adjusted_size <= spot_hedge_sell_available + 1e-12:
+                        size_bid = adjusted_size
+                        spot_hedge_sell_adjusted = adjusted_size
+                        self._decision_logger.log(
+                            {
+                                "ts": now,
+                                "event": "risk",
+                                "intent": "quote",
+                                "source": "strategy",
+                                "mode": self._state.value,
+                                "reason": "spot_hedge_sell_available_reduce",
+                                "leg": "bid",
+                                "cycle_id": self._cycle_id,
+                                "spot_available": spot_hedge_sell_available,
+                                "required_size": spot_hedge_sell_required,
+                                "adjusted_size": adjusted_size,
+                                "base_coin": self._config.symbols.spot.symbol.replace("USDT", ""),
+                                "action": "reduce_bid_quote_size",
+                            }
+                        )
+                    else:
+                        size_bid = 0.0
+                        spot_hedge_sell_available_block = True
+                        self._decision_logger.log(
+                            {
+                                "ts": now,
+                                "event": "risk",
+                                "intent": "quote",
+                                "source": "strategy",
+                                "mode": self._state.value,
+                                "reason": "spot_hedge_sell_available_block",
+                                "leg": "bid",
+                                "cycle_id": self._cycle_id,
+                                "spot_available": spot_hedge_sell_available,
+                                "required_size": spot_hedge_sell_required,
+                                "adjusted_size": adjusted_size,
+                                "base_coin": self._config.symbols.spot.symbol.replace("USDT", ""),
+                                "action": "suppress_bid_quote",
+                            }
+                        )
 
         one_sided_policy = self._config.strategy.one_sided_quote_policy
         suppress_bid, suppress_ask = self._one_sided_quote_suppression(
@@ -948,6 +974,7 @@ class MMFundingStrategy:
             final_should_quote_ask=size_ask > 0,
             spot_hedge_sell_available=spot_hedge_sell_available,
             spot_hedge_sell_required=spot_hedge_sell_required,
+            spot_hedge_sell_adjusted=spot_hedge_sell_adjusted,
             spot_hedge_sell_available_block=spot_hedge_sell_available_block,
         )
         await self._oms.update_quotes(
@@ -1166,6 +1193,7 @@ class MMFundingStrategy:
         cancel_aggressive_quality_suppressed: bool = False,
         spot_hedge_sell_available: float | None = None,
         spot_hedge_sell_required: float | None = None,
+        spot_hedge_sell_adjusted: float | None = None,
         spot_hedge_sell_available_block: bool = False,
     ) -> None:
         active_quotes = self._active_quote_snapshot()
@@ -1213,6 +1241,7 @@ class MMFundingStrategy:
                 "one_sided_suppressed_ask": one_sided_suppressed_ask,
                 "spot_hedge_sell_available": spot_hedge_sell_available,
                 "spot_hedge_sell_required": spot_hedge_sell_required,
+                "spot_hedge_sell_adjusted": spot_hedge_sell_adjusted,
                 "spot_hedge_sell_available_block": spot_hedge_sell_available_block,
                 "final_should_quote_bid": final_should_quote_bid,
                 "final_should_quote_ask": final_should_quote_ask,

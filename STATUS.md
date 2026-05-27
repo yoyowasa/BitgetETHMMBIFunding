@@ -2350,3 +2350,37 @@ ec1b00a  chore: bulk update after lint & format
 
 ### 未確定点
 - 修正後の DRY / live bounded forward は未実施。
+
+---
+
+## 2026-05-27 SPOT fee 後の partial BID exit 修正
+
+### 観測事実
+- 対象ログ: `runtime_logs\live_forward_flatten_defer_size_quant_24h_20260525_172423`
+- 24h bounded run は完走。`HALTED=0`、`order_reject=0`、`fill_parse_warning=0`、`shutdown_cancel_all_done=1`。
+- 約定は `USDT-FUTURES:QUOTE_ASK sell 0.02` と `SPOT:HEDGE buy 0.02` の 2 件。
+- `QUOTE_ASK orders=11456`、`QUOTE_BID orders=0`。
+- HEDGE buy 後の SPOT available は `0.019980000718`。BID hedge sell required は `0.02`。
+- `spot_hedge_sell_available_block` により BID exit が抑制され、ヘッジ carry の回転が止まった。
+- 手動 flat 実施済み。read-only では SPOT open orders=0 / Futures open orders=0 / Futures position=0 / SPOT ETH dust。
+
+### 推論
+- SPOT HEDGE buy の手数料が ETH 払いのため、満額 `0.02` を買っても available は `0.01998` になる。
+- 満額 `0.02` の BID だけを許可する設計では、fee shortfall により exit/rebalance BID が出ない。
+
+### 実装
+- `bot/strategy/mm_funding.py`
+  - SPOT available が required を下回る場合、即 BID suppress せず、available を futures qty step に合わせて floor した partial BID size を許可。
+  - partial 化できない dust の場合は従来どおり `spot_hedge_sell_available_block`。
+  - `spot_hedge_sell_available_reduce` と `spot_hedge_sell_adjusted` をログ追加。
+- `tests/test_phase_d_strategy.py`
+  - dust では BID suppress 継続。
+  - `available=0.019980000718` では `bid_size=0.01` に縮小して BID を出す検証を追加。
+
+### 検証
+- `pytest tests\test_phase_d_strategy.py tests\test_one_sided_quote_policy.py tests\test_total_edge.py tests\test_hedge_ticket_flatten_race.py`: 18 passed。
+- `pytest`: 99 passed。
+- 起動前 read-only: SPOT open orders=0 / Futures open orders=0 / Futures position=0 / SPOT ETH available=0.000080000718 / frozen=0。
+
+### 未確定点
+- 修正後の live 24h forward はこれから実施。
