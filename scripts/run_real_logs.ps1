@@ -252,6 +252,9 @@ while (-not $proc.StandardOutput.EndOfStream) {
   if ($null -ne $line) { $line | Tee-Object -FilePath $outLog -Append }
 }
 $exitCode = $proc.ExitCode
+$proc.WaitForExit()
+$proc.Dispose()
 Remove-Item $pidFile -Force -ErrorAction SilentlyContinue
 if ($exitCode -ne 0) { exit $exitCode }  # 役割: 失敗時は同じ終了コードで落とす
+exit 0
 

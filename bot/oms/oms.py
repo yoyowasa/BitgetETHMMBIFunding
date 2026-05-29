@@ -52,10 +52,18 @@ class HedgeTicket:
     reason: str
     perp_fill_ts: float
     perp_fill_price: float
+    pending_qty: float = 0.0
+    pending_order_id: str = ""
+    pending_client_oid: str = ""
+    pending_price: float = 0.0
 
     @property
     def remain(self) -> float:
         return max(0.0, self.want_qty - self.filled_qty)
+
+    @property
+    def unreserved_qty(self) -> float:
+        return max(0.0, self.want_qty - self.filled_qty - self.pending_qty)
 
 
 @dataclass(frozen=True)
@@ -233,6 +241,46 @@ class OMS:
     def should_defer_flatten_for_unwind_pending(self, now: float | None = None) -> bool:
         now_ts = time.time() if now is None else now
         return now_ts < self._unwind_pending_until
+
+    def clear_unhedged_if_flat_dust(
+        self,
+        *,
+        mid_price: float,
+        delta_tolerance: float,
+        reason: str,
+    ) -> bool:
+        if abs(self._unhedged_qty) <= 1e-9:
+            return False
+        if self.has_open_hedge_ticket() or self.should_defer_flatten_for_unwind_pending():
+            return False
+        delta = self._positions.spot_pos + self._positions.perp_pos
+        if abs(self._positions.perp_pos) > delta_tolerance:
+            return False
+        if abs(delta) > delta_tolerance:
+            return False
+        before = self._unhedged_qty
+        self._unhedged_qty = 0.0
+        self._unhedged_since = None
+        self._orders_logger.log(
+            {
+                "ts": time.time(),
+                "event": "risk",
+                "intent": "SYSTEM",
+                "source": "oms",
+                "mode": "RUN",
+                "reason": "flat_dust_unhedged_cleared",
+                "leg": "positions",
+                "trigger_reason": reason,
+                "unhedged_qty_before": before,
+                "unhedged_qty_after": self._unhedged_qty,
+                "spot_pos_internal": self._positions.spot_pos,
+                "perp_pos_internal": self._positions.perp_pos,
+                "delta": delta,
+                "delta_notional": abs(delta) * mid_price,
+                "delta_tolerance": delta_tolerance,
+            }
+        )
+        return True
 
     async def spot_available_for_quote(self, ttl_sec: float = 10.0) -> Optional[float]:
         now = time.time()
@@ -592,6 +640,27 @@ class OMS:
                 ticket.status = "DONE"
                 self._cleanup_ticket(ticket.ticket_id)
                 continue
+            if ticket.pending_qty > 1e-9 and now < ticket.deadline_ts:
+                self._orders_logger.log(
+                    {
+                        "event": "risk",
+                        "intent": OrderIntent.HEDGE.value,
+                        "source": "oms",
+                        "mode": "HEDGING",
+                        "reason": "hedge_chase_deferred_pending_order",
+                        "leg": "spot_ioc",
+                        "cycle_id": None,
+                        "ticket_id": ticket.ticket_id,
+                        "remain": ticket.remain,
+                        "pending_qty": ticket.pending_qty,
+                        "unreserved_qty": ticket.unreserved_qty,
+                        "tries": ticket.tries,
+                    }
+                )
+                continue
+            if ticket.pending_qty > 1e-9:
+                await self._cancel_pending_hedge_order(ticket, reason="hedge_pending_expired")
+                continue
             if now < ticket.deadline_ts:
                 continue
             if ticket.tries < self._hedge_cfg.hedge_max_tries:
@@ -612,6 +681,8 @@ class OMS:
                         "cycle_id": None,
                         "ticket_id": ticket.ticket_id,
                         "remain": ticket.remain,
+                        "pending_qty": ticket.pending_qty,
+                        "unreserved_qty": ticket.unreserved_qty,
                         "tries": ticket.tries,
                     }
                 )
@@ -805,7 +876,7 @@ class OMS:
         reason: str,
         use_ticket_client: bool,
     ) -> None:
-        if ticket.remain <= 0:
+        if ticket.unreserved_qty <= 0:
             return
         if ticket.side == Side.SELL:
             allowed = await self._precheck_spot_hedge_sell_available(ticket)
@@ -827,7 +898,7 @@ class OMS:
             symbol=self._config.symbols.spot.symbol,
             side=ticket.side,
             order_type=order_type,
-            size=ticket.remain,
+            size=ticket.unreserved_qty,
             force=force,
             client_oid=client_oid,
             intent=OrderIntent.HEDGE,
@@ -835,6 +906,11 @@ class OMS:
             price=price,
         )
         order_id = await self._submit_order(req, reason=reason)
+        if order_id:
+            ticket.pending_qty += req.size
+            ticket.pending_order_id = order_id
+            ticket.pending_client_oid = client_oid
+            ticket.pending_price = 0.0 if req.price is None else req.price
         ticket.tries += 1
         ticket.deadline_ts = time.time() + self._hedge_cfg.hedge_deadline_sec
         self._orders_logger.log(
@@ -851,10 +927,33 @@ class OMS:
                 "order_id": order_id,
                 "tries": ticket.tries,
                 "remain": ticket.remain,
+                "pending_qty": ticket.pending_qty,
+                "pending_order_id": ticket.pending_order_id,
+                "unreserved_qty": ticket.unreserved_qty,
             }
         )
         if order_id:
             self._spot_order_ticket[order_id] = ticket.ticket_id
+
+    async def _cancel_pending_hedge_order(self, ticket: HedgeTicket, reason: str) -> None:
+        if not ticket.pending_order_id and not ticket.pending_client_oid:
+            ticket.pending_qty = 0.0
+            return
+        order = ActiveOrder(
+            order_id=ticket.pending_order_id,
+            client_oid=ticket.pending_client_oid,
+            price=ticket.pending_price,
+            size=ticket.pending_qty,
+            side=ticket.side,
+            intent=OrderIntent.HEDGE,
+            ts=time.time(),
+            symbol=ticket.symbol,
+        )
+        await self._cancel_order(InstType.SPOT, order, reason=reason, state="cancel_pending")
+        ticket.pending_qty = 0.0
+        ticket.pending_order_id = ""
+        ticket.pending_client_oid = ""
+        ticket.pending_price = 0.0
 
     async def _unwind_ticket(self, ticket: HedgeTicket, reason: str) -> None:
         if not self._hedge_cfg.unwind_enable:
@@ -940,6 +1039,12 @@ class OMS:
         ticket = self._hedge_tickets.get(ticket_id)
         if ticket is None:
             return
+        ticket.pending_qty = max(0.0, ticket.pending_qty - event.size)
+        if ticket.pending_qty <= 1e-9:
+            ticket.pending_qty = 0.0
+            ticket.pending_order_id = ""
+            ticket.pending_client_oid = ""
+            ticket.pending_price = 0.0
         if self._pnl is not None:
             latency_ms = max(0.0, (event.ts - ticket.perp_fill_ts) * 1000.0)
             self._pnl.record_hedge_latency(latency_ms)
@@ -967,6 +1072,7 @@ class OMS:
                     "want_qty": ticket.want_qty,
                     "filled_qty": ticket.filled_qty,
                     "remain": ticket.remain,
+                    "pending_qty": ticket.pending_qty,
                 }
             )
             self._cleanup_ticket(ticket_id)
@@ -1398,7 +1504,7 @@ class OMS:
             "cycle_id": None,
             "intent": order.intent.value,
             "inst_type": inst_type.value,
-            "symbol": self._config.symbols.perp.symbol,
+            "symbol": order.symbol or self._config.symbols.perp.symbol,
             "side": order.side.value,
             "type": "cancel",
             "price": order.price,
@@ -1413,7 +1519,7 @@ class OMS:
             return
         response = await self._gateway.cancel_order(
             inst_type,
-            symbol=self._config.symbols.perp.symbol,
+            symbol=order.symbol or self._config.symbols.perp.symbol,
             order_id=order.order_id,
             client_oid=order.client_oid,
         )
@@ -1930,7 +2036,7 @@ class OMS:
                 }
             )
             return True
-        if spot_available + 1e-12 >= ticket.remain:
+        if spot_available + 1e-12 >= ticket.unreserved_qty:
             self._orders_logger.log(
                 {
                     "ts": time.time(),
@@ -1943,6 +2049,8 @@ class OMS:
                     "cycle_id": None,
                     "ticket_id": ticket.ticket_id,
                     "remain": ticket.remain,
+                    "pending_qty": ticket.pending_qty,
+                    "unreserved_qty": ticket.unreserved_qty,
                     "spot_available": spot_available,
                     "side": ticket.side.value,
                     "symbol": ticket.symbol,
@@ -1967,6 +2075,8 @@ class OMS:
                 "cycle_id": None,
                 "ticket_id": ticket.ticket_id,
                 "remain": ticket.remain,
+                "pending_qty": ticket.pending_qty,
+                "unreserved_qty": ticket.unreserved_qty,
                 "spot_available": spot_available,
                 "side": ticket.side.value,
                 "symbol": ticket.symbol,

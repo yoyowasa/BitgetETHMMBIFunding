@@ -134,6 +134,7 @@ class OMSGateway:
     ) -> None:
         self.constraints = DummyConstraintsManager()
         self.orders: list[OrderRequest] = []
+        self.cancels: list[dict] = []
         self.spot_available = spot_available
         self.store = SimpleNamespace(positions=SimpleNamespace(find=lambda: position_rows or []))
         self.place_order_response = place_order_response or {"code": "00000", "data": {"orderId": "order-1"}}
@@ -145,6 +146,24 @@ class OMSGateway:
     async def place_order(self, req: OrderRequest) -> dict:
         self.orders.append(req)
         return self.place_order_response
+
+    async def cancel_order(
+        self,
+        inst_type: InstType,
+        *,
+        symbol: str,
+        order_id: str,
+        client_oid: str,
+    ) -> dict:
+        self.cancels.append(
+            {
+                "inst_type": inst_type,
+                "symbol": symbol,
+                "order_id": order_id,
+                "client_oid": client_oid,
+            }
+        )
+        return {"code": "00000"}
 
 
 def _config() -> AppConfig:
@@ -425,6 +444,132 @@ def test_spot_hedge_sell_available_precheck_unwinds_without_chase() -> None:
         for record in orders_logger.records
         if record.get("event") == "order_new" and record.get("intent") == "HEDGE"
     ] == []
+
+
+def test_hedge_chase_defers_while_spot_order_pending() -> None:
+    gateway = OMSGateway()
+    orders_logger = CapturingLogger()
+    oms = OMS(
+        gateway,
+        _config(),
+        risk=None,
+        orders_logger=orders_logger,
+        fills_logger=CapturingLogger(),
+    )
+    now = time.time()
+    oms._hedge_tickets["ticket-1"] = HedgeTicket(
+        ticket_id="ticket-1",
+        symbol="ETHUSDT",
+        side=Side.BUY,
+        want_qty=0.02,
+        filled_qty=0.0,
+        created_ts=now - 10.0,
+        deadline_ts=now + 5.0,
+        tries=1,
+        status="OPEN",
+        reason="perp_fill",
+        perp_fill_ts=now - 10.0,
+        perp_fill_price=100.0,
+        pending_qty=0.02,
+    )
+
+    asyncio.run(
+        oms.process_hedge_tickets(
+            SimpleNamespace(bid=100.0, ask=100.2, bid_size=1.0, ask_size=1.0)
+        )
+    )
+
+    assert gateway.orders == []
+    assert oms.has_open_hedge_ticket() is True
+    risks = [
+        record
+        for record in orders_logger.records
+        if record.get("reason") == "hedge_chase_deferred_pending_order"
+    ]
+    assert risks
+    assert risks[-1]["pending_qty"] == 0.02
+    assert risks[-1]["unreserved_qty"] == 0.0
+
+
+def test_hedge_pending_order_cancelled_before_chase_after_deadline() -> None:
+    gateway = OMSGateway()
+    orders_logger = CapturingLogger()
+    oms = OMS(
+        gateway,
+        _config(),
+        risk=None,
+        orders_logger=orders_logger,
+        fills_logger=CapturingLogger(),
+    )
+    now = time.time()
+    oms._hedge_tickets["ticket-1"] = HedgeTicket(
+        ticket_id="ticket-1",
+        symbol="ETHUSDT",
+        side=Side.BUY,
+        want_qty=0.02,
+        filled_qty=0.0,
+        created_ts=now - 10.0,
+        deadline_ts=now - 5.0,
+        tries=1,
+        status="OPEN",
+        reason="perp_fill",
+        perp_fill_ts=now - 10.0,
+        perp_fill_price=100.0,
+        pending_qty=0.02,
+        pending_order_id="spot-order-1",
+        pending_client_oid="HEDGE-ticket-1",
+        pending_price=100.2,
+    )
+
+    asyncio.run(
+        oms.process_hedge_tickets(
+            SimpleNamespace(bid=100.0, ask=100.2, bid_size=1.0, ask_size=1.0)
+        )
+    )
+
+    assert gateway.orders == []
+    assert gateway.cancels == [
+        {
+            "inst_type": InstType.SPOT,
+            "symbol": "ETHUSDT",
+            "order_id": "spot-order-1",
+            "client_oid": "HEDGE-ticket-1",
+        }
+    ]
+    assert oms._hedge_tickets["ticket-1"].pending_qty == 0.0
+
+
+def test_flat_dust_clears_stale_unhedged_qty() -> None:
+    gateway = OMSGateway()
+    orders_logger = CapturingLogger()
+    oms = OMS(
+        gateway,
+        _config(),
+        risk=None,
+        orders_logger=orders_logger,
+        fills_logger=CapturingLogger(),
+    )
+    oms.positions.spot_pos = 0.00004
+    oms.positions.perp_pos = 0.0
+    oms._unhedged_qty = -0.02
+    oms._unhedged_since = time.time() - 10.0
+
+    cleared = oms.clear_unhedged_if_flat_dust(
+        mid_price=2000.0,
+        delta_tolerance=0.01,
+        reason="test",
+    )
+
+    assert cleared is True
+    assert oms.unhedged_qty == 0.0
+    assert oms.unhedged_since is None
+    risks = [
+        record
+        for record in orders_logger.records
+        if record.get("reason") == "flat_dust_unhedged_cleared"
+    ]
+    assert risks
+    assert risks[-1]["unhedged_qty_before"] == -0.02
 
 
 def test_flatten_skips_futures_order_when_position_sync_reports_flat() -> None:

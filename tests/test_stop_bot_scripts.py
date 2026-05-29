@@ -36,3 +36,5 @@ def test_run_real_logs_records_actual_bot_pid_metadata() -> None:
     assert "bot.run.json" in script
     assert "config_path" in script
     assert "bot_mode" in script
+    assert "$proc.Dispose()" in script
+    assert "exit 0" in script

@@ -545,6 +545,17 @@ class MMFundingStrategy:
         spot_pos = self._oms.positions.spot_pos
         perp_pos = self._oms.positions.perp_pos
         delta = spot_pos + perp_pos
+        clear_flat_dust = getattr(self._oms, "clear_unhedged_if_flat_dust", None)
+        if callable(clear_flat_dust):
+            cleared = clear_flat_dust(
+                mid_price=mid_spot,
+                delta_tolerance=self._config.strategy.delta_tolerance,
+                reason="pre_unhedged_check",
+            )
+            if cleared:
+                spot_pos = self._oms.positions.spot_pos
+                perp_pos = self._oms.positions.perp_pos
+                delta = spot_pos + perp_pos
         if (
             abs(spot_pos) * mid_spot > self._config.risk.max_position_notional
             or abs(perp_pos) * mid_perp > self._config.risk.max_position_notional

@@ -2384,3 +2384,49 @@ ec1b00a  chore: bulk update after lint & format
 
 ### 未確定点
 - 修正後の live 24h forward はこれから実施。
+
+---
+
+## 2026-05-30 live 24h 後分析 / FLATTENING dust 復帰修正
+
+### 観測事実
+- 対象ログ: `runtime_logs\live_forward_partial_bid_exit_24h_20260527_170927`
+- 24h bounded run は終了済み。`shutdown_cancel_all_done=1`、`shutdown_cancel_all_failed=0`、`HALTED=0`、`order_reject=0`、`fill_parse_warning=0`。
+- `bot.app` は残存なし。`run_real_logs.ps1` wrapper `powershell.exe` が単独残留。
+- 約定は `QUOTE_ASK sell 0.04`、`SPOT HEDGE buy 0.06`、`FUTURES FLATTEN buy 0.04`、`SPOT FLATTEN sell 0.0599`。
+- 終端内部状態は `spot_pos=0.00004` / `perp_pos=0.0` / `unhedged_qty=-0.02`。
+- `spot_flatten_available_precheck` と `FLATTEN order_skip size=0` が大量発生。
+- `SPOT HEDGE` chase が、先行 spot hedge order の fill 到着前に追加発注され、過剰 hedge になった。
+- `resp_code 22002` は発生したが、`order_reject=0` で reject streak には積まれていない。
+
+### 推論
+- 実口座は flat/dust だが、内部 `unhedged_qty` が FLATTEN 後に残り、`FLATTENING` 復帰不能になった。
+- `HEDGE` ticket が pending spot order 数量を持たず、未約定注文がある状態で chase を重ねた。
+- wrapper 単独残留は、子プロセス終了後の明示終了不足が原因候補。
+
+### 実装
+- `bot/oms/oms.py`
+  - `HedgeTicket.pending_qty` / `pending_order_id` / `unreserved_qty` を追加。
+  - pending spot hedge order が残る間は `hedge_chase_deferred_pending_order` として chase を抑止。
+  - pending spot hedge order が期限切れなら chase 前に spot cancel を実行。
+  - hedge fill 受信時に `pending_qty` を減算。
+  - flat/dust かつ open hedge/unwind pending なしの場合に `unhedged_qty` をクリアする `flat_dust_unhedged_cleared` を追加。
+- `bot/strategy/mm_funding.py`
+  - unhedged 判定前に `clear_unhedged_if_flat_dust` を呼び、FLATTEN 後 dust から `QUOTING` 復帰できるようにした。
+- `scripts/run_real_logs.ps1`
+  - child process 終了後に `WaitForExit()` / `Dispose()` / `exit 0` を明示。
+- `tests/test_hedge_ticket_flatten_race.py`
+  - pending spot hedge order 中に chase しない検証を追加。
+  - pending spot hedge order 期限切れ時に chase 前 cancel する検証を追加。
+  - flat/dust で stale `unhedged_qty` をクリアする検証を追加。
+- `tests/test_stop_bot_scripts.py`
+  - wrapper 明示終了の文字列検証を追加。
+
+### 検証
+- `pytest tests\test_hedge_ticket_flatten_race.py tests\test_stop_bot_scripts.py`: 17 passed。
+- `pytest`: 102 passed。
+- PowerShell syntax check: `scripts\run_real_logs.ps1` / `scripts\stop_bot.ps1` OK。
+- `config.yaml` 差分なし。
+
+### 未確定点
+- 修正後の DRY / live forward は未実施。
