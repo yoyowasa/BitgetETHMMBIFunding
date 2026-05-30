@@ -2430,3 +2430,35 @@ ec1b00a  chore: bulk update after lint & format
 
 ### 未確定点
 - 修正後の DRY / live forward は未実施。
+
+---
+
+## 2026-05-31 24h live 収益化分析 / half spread 最小調整
+
+### 観測事実
+- 対象ログ: `runtime_logs\live_forward_hedge_pending_flat_dust_24h_20260530_011727`
+- 24h bounded run は完走。`shutdown_cancel_all_done=1`、`HALTED=0`、`order_reject=0`、`fill_parse_warning=0`、`22002=0`。
+- `fill_count=0`、`pnl_net_sum=0.0`。
+- `QUOTE_ASK order_new=12044`、`QUOTE_BID order_new=0`。
+- `spot_hedge_sell_available_block=158905`。SPOT available は `0.000120000718`、required は `0.02`。
+- active ASK と買い約定価格の距離は p50 約 `17.23bps`、最小 約 `5.99bps`。
+- active ASK と best ask の距離は p50 約 `17.22bps`。
+
+### 推論
+- 安全面は合格だが、収益化は fill 0 のため不合格。
+- BID は SPOT dust のため設計通り停止。初回 entry は ASK 側に依存。
+- 現行 `18bps` half spread は 24h で約定しない水準。
+- `16bps` なら概算 expected edge はプラスを保ちつつ、約定候補が増える可能性がある。
+
+### 実装
+- `config.yaml`
+  - `strategy.base_half_spread_bps`: `18.0 -> 16.0`
+  - `strategy.min_half_spread_bps`: `18.0 -> 16.0`
+
+### 検証
+- `pytest`: 102 passed。
+- `load_config('config.yaml')`: `base_half_spread_bps=16.0` / `min_half_spread_bps=16.0`。
+
+### 未確定点
+- `16bps` 設定での DRY / short live fill率は未確認。
+- 実約定後の `HEDGE pending` / `flat_dust_unhedged_cleared` パスは未確認。

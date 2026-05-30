@@ -38,7 +38,7 @@ strategy:
   obi_levels: 5
   alpha_obi_bps: 1.0
   gamma_inventory_bps: 2.0
-  base_half_spread_bps: 18.0
+  base_half_spread_bps: 16.0
   fade_vol_bps: 3.0
   quote_fade_policy: threshold_8bps
   aggressive_trade_proximity_bps: 1.0
@@ -57,7 +57,7 @@ strategy:
   funding_skew_bps_per_rate: 1000.0
   target_inventory_max_ratio: 1.0
   funding_window_sec: 300.0
-  min_half_spread_bps: 18.0
+  min_half_spread_bps: 16.0
   quote_refresh_ms: 500
   dry_run: false
 
