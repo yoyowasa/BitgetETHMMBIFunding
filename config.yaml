@@ -49,7 +49,7 @@ strategy:
   cancel_aggressive_active_proximity_bps: 1.0
   one_sided_quote_policy: current
   tfi_fade_threshold: 0.6
-  tfi_fade_policy: threshold_0p7
+  tfi_fade_policy: disabled
   reprice_threshold_bps: 2.5
   adverse_fill_horizon_sec: 2.0
   adverse_buffer_bps: 2.0

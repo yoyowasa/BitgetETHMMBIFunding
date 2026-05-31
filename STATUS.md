@@ -2462,3 +2462,34 @@ ec1b00a  chore: bulk update after lint & format
 ### 未確定点
 - `16bps` 設定での DRY / short live fill率は未確認。
 - 実約定後の `HEDGE pending` / `flat_dust_unhedged_cleared` パスは未確認。
+
+---
+
+## 2026-06-01 16bps live 15分 / tfi_fade 無効化
+
+### 観測事実
+- 対象ログ: `runtime_logs\live_forward_16bps_fill_discovery_15min_20260601_034218`
+- 15分 bounded run は完走。`shutdown_cancel_all_done=1`、`HALTED=0`、`order_reject=0`、`fill_parse_warning=0`。
+- `fill_count=0`、`pnl_net_sum=0.0`。
+- `QUOTE_ASK order_new=125`、`QUOTE_BID order_new=0`。
+- `spot_hedge_sell_available_block=1671`。
+- `tfi_fade=1394`。内訳は `ask=886` / `bid=508`。
+- TFI は飽和気味。`abs(tfi)>=0.7` が `1440/1721`。
+- active ASK と買い約定価格の距離は p50 約 `30.91bps`。TFI fade によりASKが遠くなる時間が多い。
+
+### 推論
+- `16bps` でも fill が出ない主因候補は、半分以上の時間で TFI fade がASKを追加で遠ざけていること。
+- TFI が飽和気味のため、現状の `threshold_0p7` はフィルターとして強すぎる。
+- half spread をさらに狭める前に、`tfi_fade_policy` を無効化して実約定機会を確認するのが最小変更。
+
+### 実装
+- `config.yaml`
+  - `strategy.tfi_fade_policy`: `threshold_0p7 -> disabled`
+
+### 検証
+- `load_config('config.yaml')`: `base_half_spread_bps=16.0`、`min_half_spread_bps=16.0`、`tfi_fade_policy=disabled`。
+- `.venv\Scripts\python.exe -m pytest -q`: `102 passed`。
+
+### 未確定点
+- `16bps + tfi_fade disabled` の short live fill率は未確認。
+- 実約定後の `HEDGE pending` / `flat_dust_unhedged_cleared` パスは未確認。
