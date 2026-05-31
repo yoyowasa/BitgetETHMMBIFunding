@@ -2526,3 +2526,35 @@ ec1b00a  chore: bulk update after lint & format
 ### 未確定点
 - `14bps + tfi_fade disabled` の short live fill率は未確認。
 - 実約定後の `HEDGE pending` / `flat_dust_unhedged_cleared` パスは未確認。
+
+---
+
+## 2026-06-01 14bps no_tfi_fade live 15分・60分
+
+### 観測事実
+- 15分ログ: `runtime_logs\live_forward_14bps_no_tfi_fade_15min_20260601_041837`
+- 60分ログ: `runtime_logs\live_forward_14bps_no_tfi_fade_60min_20260601_043635`
+- 15分: `shutdown_cancel_all_done=1`、`shutdown_cancel_all_failed=0`、`forced_stop_used=0`、`HALTED=0`、`order_reject=0`、`fill_parse_warning=0`、`resp_code 22002=0`。
+- 15分: `fill_count=0`、`pnl_net_sum=0.0`、`QUOTE_ASK order_new=102`、`QUOTE_BID order_new=0`。
+- 15分: QUOTE_ASK と最新 mid の距離は p50 約 `13.00bps`、p90 約 `14.66bps`。
+- 60分: `shutdown_cancel_all_done=1`、`shutdown_cancel_all_failed=0`、`forced_stop_used=0`、`HALTED=0`、`order_reject=0`、`fill_parse_warning=0`、`resp_code 22002=0`。
+- 60分: `fill_count=0`、`pnl_net_sum=0.0`、`QUOTE_ASK order_new=312`、`QUOTE_BID order_new=0`。
+- 60分: QUOTE_ASK と最新 mid の距離は p50 約 `13.54bps`、p90 約 `14.85bps`。
+- 60分終了後 read-only: `SPOT open orders=0`、`Futures open orders=0`、`Futures ETHUSDT position=0.0`、`SPOT ETH available=0.000120000718`、`SPOT ETH frozen=0.0`。
+
+### 推論
+- 安全面は合格。停止・残留・reject・parse warning は問題なし。
+- 収益化は不合格。`14bps` は現行コスト式で正エッジ下限付近だが、60分で fill なし。
+- `12bps` 以下に下げると fill discovery は進む可能性があるが、通常運用前提では負エッジ化する。
+- 現状の one-sided ASK entry だけでは、正エッジを維持したまま約定を取れていない。
+
+### 実装
+- 追加コード変更なし。
+
+### 検証
+- `.venv\Scripts\python.exe scripts\analyze_live_profitability.py runtime_logs\live_forward_14bps_no_tfi_fade_60min_20260601_043635`: `fill_count=0`、`pnl_net_sum=0.0`。
+- read-only 実口座確認: open orders `0`、Futures position `0.0`、SPOT dust のみ。
+
+### 未確定点
+- 実約定後の `HEDGE pending` / `flat_dust_unhedged_cleared` パスは未確認。
+- 次の収益化候補は、負エッジ spread への単純縮小ではなく、entry 構造の変更または在庫前提の見直し。
