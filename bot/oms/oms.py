@@ -1578,6 +1578,12 @@ class OMS:
         slip_bps: float,
     ) -> tuple[OrderType, Force, float]:
         price = spot_bbo.ask if ticket.side == Side.BUY else spot_bbo.bid
+        if self._hedge_cfg.use_spot_limit_ioc:
+            if ticket.side == Side.BUY:
+                price *= 1 + (slip_bps / 10000.0)
+            else:
+                price *= 1 - (slip_bps / 10000.0)
+            return OrderType.LIMIT, Force.IOC, price
         unhedged_sec = max(0.0, time.time() - ticket.created_ts)
         if unhedged_sec < (self._config.risk.max_unhedged_sec * 0.5):
             return OrderType.LIMIT, Force.POST_ONLY, price

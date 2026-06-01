@@ -2633,3 +2633,38 @@ ec1b00a  chore: bulk update after lint & format
 
 ### 未確定点
 - 実 fill 発生時の `positions_rest_fallback` / `open_delta_without_hedge_ticket` は未確認。
+
+---
+
+## 2026-06-01 XRPUSDT live 30分 / HEDGE IOC 修正
+
+### 観測事実
+- `SYMBOL=XRPUSDT` live 30分: `runtime_logs\live_symbol_XRPUSDT_after_rest_flat_fix_30min_20260601_230228`。
+- live 30分: `HALTED=0`、`order_reject=0`、`fill_parse_warning=0`、`shutdown_cancel_all_done=1`、`shutdown_cancel_all_failed=0`。
+- `runtime_log_dir_identity=1`、`startup_cancel_all_done=1`、`startup_open_spot_balance_detected=0`。
+- `book_rx_rate=29`、`fill_monitor_heartbeat=30`、`positions_monitor_heartbeat=29`。
+- QUOTE_ASK sell fill: `price=1.2857`、`size=46.0`、`fee=-0.0082799`。
+- HEDGE spot buy は `force=post_only` で出て約定せず、`ticket_failed fail_reason=flatten_started`。
+- FLATTEN futures buy fill: `price=1.2859`、`size=45.0 + 1.0`、`fee=-0.02430358`。
+- `positions_rest_fallback=283`、`flat_dust_unhedged_cleared=1`。
+- 終了後 read-only: `SPOT open orders=0`、`Futures open orders=0`、`Futures XRPUSDT position=0.0`、`SPOT XRP available=0.000046`、`SPOT XRP frozen=0.0`。
+
+### 推論
+- 実 fill の parse は成功し、price / size / fee は 0 ではない。
+- 安全復旧は成功。ただし初回 HEDGE が post-only のため、spot hedge ではなく futures flatten になり、収益化には不利。
+- `use_spot_limit_ioc=true` の設定意図と実装がズレていた。
+
+### 実装
+- `bot/oms/oms.py`
+  - `use_spot_limit_ioc=true` の場合、初回 HEDGE から aggressive limit IOC を使うよう修正。
+  - `use_spot_limit_ioc=false` の場合だけ旧 post-only then IOC ladder を維持。
+- `tests/test_hedge_ladder.py`
+  - true 時の即 IOC test と false 時の旧 ladder test に分離。
+
+### 検証
+- `.venv\Scripts\python.exe -m pytest -q tests\test_hedge_ladder.py tests\test_hedge_ticket_flatten_race.py tests\test_fill_parser.py`: `31 passed`。
+- `.venv\Scripts\python.exe -m pytest -q`: `106 passed`。
+- `git diff -- config.yaml`: 差分なし。
+
+### 未確定点
+- 修正後 live で HEDGE spot IOC が実際に約定するかは未確認。
