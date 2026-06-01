@@ -41,11 +41,18 @@ class DummyRisk:
         return False
 
     def unhedged_exceeded(self, unhedged_notional: float, unhedged_since) -> bool:
-        return True
+        return unhedged_notional > 0
 
 
 class StrategyOMS:
-    def __init__(self, *, defer_flatten: bool, unwind_pending: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        defer_flatten: bool,
+        unwind_pending: bool = False,
+        open_ticket: bool = True,
+        unhedged_qty: float = 0.02,
+    ) -> None:
         self.gateway = SimpleNamespace(
             book_ready=True,
             public_book_channel="books5",
@@ -55,7 +62,7 @@ class StrategyOMS:
             mid_100ms_ago=lambda now=None: None,
         )
         self.positions = SimpleNamespace(spot_pos=0.0, perp_pos=-0.02)
-        self.unhedged_qty = 0.02
+        self.unhedged_qty = unhedged_qty
         self.unhedged_since = time.time() - 3.0
         self.cancel_reasons: list[str] = []
         self.flatten_calls: list[dict] = []
@@ -63,12 +70,16 @@ class StrategyOMS:
         self._defer_flatten = defer_flatten
         self._unwind_pending = unwind_pending
         deadline = time.time() + (10.0 if defer_flatten else -1.0)
-        self._ticket = SimpleNamespace(
-            ticket_id="ticket-1",
-            remain=0.02,
-            deadline_ts=deadline,
-            tries=1,
-            expired=not defer_flatten,
+        self._ticket = (
+            SimpleNamespace(
+                ticket_id="ticket-1",
+                remain=0.02,
+                deadline_ts=deadline,
+                tries=1,
+                expired=not defer_flatten,
+            )
+            if open_ticket
+            else None
         )
 
     async def process_hedge_tickets(self, spot_bbo) -> None:
@@ -87,7 +98,7 @@ class StrategyOMS:
         return self._ticket
 
     def should_defer_flatten_for_hedge_ticket(self, now: float | None = None) -> bool:
-        return self._defer_flatten
+        return self._ticket is not None and self._defer_flatten
 
     def should_defer_flatten_for_unwind_pending(self, now: float | None = None) -> bool:
         return self._unwind_pending
@@ -270,6 +281,21 @@ def test_unhedged_exceeded_defers_flatten_before_hedge_deadline(monkeypatch) -> 
     assert risks[-1]["hedge_ticket_id"] == "ticket-1"
     assert risks[-1]["hedge_ticket_remain"] == 0.02
     assert risks[-1]["action_taken"] == "defer_flatten_cancel_quotes"
+
+
+def test_open_delta_without_hedge_ticket_flattens(monkeypatch) -> None:
+    oms = StrategyOMS(
+        defer_flatten=False,
+        open_ticket=False,
+        unhedged_qty=0.0,
+    )
+    logger = _run_strategy_step(monkeypatch, oms)
+
+    assert oms.flatten_calls == [
+        {"cycle_id": 1, "reason": "open_delta_without_hedge_ticket"}
+    ]
+    assert oms.update_quote_calls == []
+    assert logger.records[-1]["reason"] == "open_delta_without_hedge_ticket"
 
 
 def test_unhedged_exceeded_flattens_after_hedge_deadline(monkeypatch) -> None:

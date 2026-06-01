@@ -2558,3 +2558,46 @@ ec1b00a  chore: bulk update after lint & format
 ### 未確定点
 - 実約定後の `HEDGE pending` / `flat_dust_unhedged_cleared` パスは未確認。
 - 次の収益化候補は、負エッジ spread への単純縮小ではなく、entry 構造の変更または在庫前提の見直し。
+
+---
+
+## 2026-06-01 SOL/XRP 銘柄変更検証 / private fill 欠落対策
+
+### 観測事実
+- `SYMBOL=SOLUSDT` DRY 15分: `runtime_logs\dry_symbol_SOLUSDT_15min_20260601_171138`。
+- SOL DRY: `HALTED=0`、`order_reject=0`、`fill_parse_warning=0`、`shutdown_cancel_all_done=1`。ただし run 中 funding が負で `funding_off`、`order_new=0`。
+- Bitget 公開API確認では、候補内で `XRPUSDT` が funding `1.0bps`、perp spread 約 `0.77bps`、24h quote volume 約 `115M`。
+- `SYMBOL=XRPUSDT` DRY 15分: `runtime_logs\dry_symbol_XRPUSDT_15min_20260601_172822`。
+- XRP DRY: `HALTED=0`、`order_reject=0`、`fill_parse_warning=0`、`shutdown_cancel_all_done=1`、`QUOTE_ASK order_new=359`。
+- XRP live 前 read-only: `SPOT open orders=0`、`Futures open orders=0`、`Futures XRPUSDT position=0.0`、`SPOT XRP available=0.000046`、`SPOT XRP frozen=0.0`。
+- `SYMBOL=XRPUSDT` live 15分: `runtime_logs\live_symbol_XRPUSDT_15min_20260601_174446`。
+- XRP live: `HALTED=0`、`order_reject=0`、`fill_parse_warning=0`、`shutdown_cancel_all_done=1`、`QUOTE_ASK order_new=363`。
+- XRP live 後 read-only で `Futures XRPUSDT position=-46.0` を検出。`fills.jsonl` は `fill_count=0`、`fill_monitor_heartbeat.store_fill_count=0`、`positions_monitor_heartbeat.store_positions_count=0`。
+- 手動安全復旧: `reduceOnly=YES` の XRPUSDT market buy `46` を送信し、response `code=00000`。
+- 復旧後 read-only: `SPOT open orders=0`、`Futures open orders=0`、`Futures XRPUSDT position=0.0`、`SPOT XRP frozen=0.0`。
+
+### 推論
+- XRP は ETH より quote 生成密度が高く、銘柄変更の方向性は有効候補。
+- ただし private WS の `fill` / `positions` store が空のまま実約定が発生し、bot が hedge できなかった。
+- 収益化検証を続ける前に、REST position fallback と未認識 delta の強制 flatten が必須。
+
+### 実装
+- `bot/exchange/bitget_gateway.py`
+  - read-only REST `get_perp_position()` を追加。
+- `bot/oms/oms.py`
+  - WS positions store が空の場合、live では REST position fallback で `perp_pos` を同期。
+- `bot/strategy/mm_funding.py`
+  - `abs(delta) > delta_tolerance` かつ hedge ticket / unhedged がない場合、quote せず `open_delta_without_hedge_ticket` で `flatten`。
+- `tests/test_startup_reconciliation.py`
+  - WS positions store 空時の REST fallback test を追加。
+- `tests/test_hedge_ticket_flatten_race.py`
+  - hedge ticket なし open delta の flatten test を追加。
+
+### 検証
+- `.venv\Scripts\python.exe -m pytest -q tests\test_startup_reconciliation.py tests\test_hedge_ticket_flatten_race.py`: `19 passed`。
+- `.venv\Scripts\python.exe -m pytest -q`: `104 passed`。
+- `git diff -- config.yaml`: 差分なし。
+
+### 未確定点
+- private WS の fill/positions store が空になる根本原因は未確定。
+- 修正後の live 再検証は未実施。次の live は XRPUSDT 15分以下に限定し、REST fallback / `open_delta_without_hedge_ticket` を重点監視する。

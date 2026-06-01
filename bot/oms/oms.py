@@ -471,18 +471,29 @@ class OMS:
     async def _sync_positions_once(self, timeout_sec: float = 5.0) -> None:
         store = getattr(self._gateway, "store", None)
         positions_store = getattr(store, "positions", None)
-        if positions_store is None:
-            return
-        wait = getattr(positions_store, "wait", None)
-        if callable(wait):
-            try:
-                await asyncio.wait_for(wait(), timeout=timeout_sec)
-            except Exception:
-                pass
-        rows = list(positions_store.find())
+        rows = []
+        if positions_store is not None:
+            wait = getattr(positions_store, "wait", None)
+            if callable(wait):
+                try:
+                    await asyncio.wait_for(wait(), timeout=timeout_sec)
+                except Exception:
+                    pass
+            rows = list(positions_store.find())
         positions_empty = len(rows) == 0
         perp_pos = self._perp_pos_from_rows(rows)
         if perp_pos is None and positions_empty:
+            rest_getter = getattr(self._gateway, "get_perp_position", None)
+            if not self._dry_run and callable(rest_getter):
+                rest_perp_pos = await rest_getter()
+                if rest_perp_pos is not None:
+                    self._last_positions_empty = False
+                    self._sync_positions_value(
+                        rest_perp_pos,
+                        reason="positions_rest_fallback",
+                        positions_empty=True,
+                    )
+                    return
             self._last_positions_empty = True
             if not self._dry_run and self._positions_sync_authoritative:
                 self._sync_positions_value(

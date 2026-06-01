@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 from bot.config import (
     AppConfig,
@@ -25,12 +26,17 @@ class CapturingLogger:
 
 
 class DummyGateway:
-    def __init__(self, available: float | None) -> None:
+    def __init__(self, available: float | None, *, perp_position: float | None = None) -> None:
         self.available = available
+        self.perp_position = perp_position
+        self.store = SimpleNamespace(positions=SimpleNamespace(find=lambda: []))
 
     async def get_spot_available_balance(self, base_coin: str) -> float | None:
         assert base_coin == "ETH"
         return self.available
+
+    async def get_perp_position(self) -> float | None:
+        return self.perp_position
 
 
 def _config(*, dry_run: bool = False) -> AppConfig:
@@ -72,13 +78,18 @@ def _config(*, dry_run: bool = False) -> AppConfig:
     )
 
 
-def _oms(available: float | None, *, dry_run: bool = False) -> tuple[OMS, RiskGuards, CapturingLogger]:
+def _oms(
+    available: float | None,
+    *,
+    dry_run: bool = False,
+    perp_position: float | None = None,
+) -> tuple[OMS, RiskGuards, CapturingLogger]:
     config = _config(dry_run=dry_run)
     risk = RiskGuards(config.risk)
     logger = CapturingLogger()
     return (
         OMS(
-            DummyGateway(available),
+            DummyGateway(available, perp_position=perp_position),
             config,
             risk=risk,
             orders_logger=logger,
@@ -130,3 +141,13 @@ def test_startup_reconciliation_passes_when_actual_matches_internal_within_toler
     assert not risk.is_halted()
     assert logger.records[-1]["reason"] == "startup_spot_balance_reconciled"
     assert abs(logger.records[-1]["diff"] - -0.000059999282) < 1e-12
+
+
+def test_positions_sync_uses_rest_fallback_when_ws_store_empty() -> None:
+    oms, _, logger = _oms(0.0, dry_run=False, perp_position=-46.0)
+
+    asyncio.run(oms._sync_positions_once(timeout_sec=0.01))
+
+    assert oms.positions.perp_pos == -46.0
+    assert logger.records[-1]["reason"] == "positions_rest_fallback"
+    assert logger.records[-1]["positions_empty"] is True

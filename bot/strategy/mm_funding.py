@@ -684,6 +684,44 @@ class MMFundingStrategy:
             )
             return
 
+        open_hedge_ticket_getter = getattr(self._oms, "open_hedge_ticket_snapshot", None)
+        open_hedge_ticket = (
+            open_hedge_ticket_getter(now=now)
+            if callable(open_hedge_ticket_getter)
+            else None
+        )
+        unhedged_qty_now = float(getattr(self._oms, "unhedged_qty", 0.0) or 0.0)
+        defer_for_unwind = getattr(
+            self._oms,
+            "should_defer_flatten_for_unwind_pending",
+            lambda now=None: False,
+        )
+        if (
+            abs(delta) > self._config.strategy.delta_tolerance
+            and abs(unhedged_qty_now) <= 1e-9
+            and open_hedge_ticket is None
+            and not defer_for_unwind(now=now)
+        ):
+            self._state = StrategyState.FLATTENING
+            await self._oms.flatten(
+                spot_bbo,
+                self._cycle_id,
+                reason="open_delta_without_hedge_ticket",
+            )
+            self._log_decision(
+                now,
+                spot_bbo,
+                perp_bbo,
+                funding.funding_rate,
+                basis,
+                obi_spot,
+                obi_perp,
+                target_q,
+                "open_delta_without_hedge_ticket",
+                tfi,
+            )
+            return
+
         alpha_px = micro_price * (self._config.strategy.alpha_obi_bps / 10000.0) * obi_perp
         tfi_px = micro_price * (self._config.strategy.k_tfi_bps / 10000.0) * tfi
         inv_ratio = 0.0 if target_q == 0 else (perp_pos - target_perp) / target_q

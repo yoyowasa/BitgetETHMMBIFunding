@@ -261,6 +261,20 @@ class BitgetGateway:
         rows = data if isinstance(data, list) else [data]
         return _available_spot_balance_from_rows(rows, base_coin)
 
+    async def get_perp_position(self) -> Optional[float]:
+        perp = self.config.symbols.perp
+        payload = await self.rest_get(
+            "/api/v2/mix/position/single-position",
+            params={
+                "symbol": perp.symbol,
+                "productType": perp.productType,
+                "marginCoin": perp.marginCoin,
+            },
+        )
+        data = payload.get("data")
+        rows = data if isinstance(data, list) else [data]
+        return _perp_position_from_rows(rows, perp.symbol)
+
     async def load_constraints(self) -> ConstraintsRegistry:
         spot = self.config.symbols.spot
         perp = self.config.symbols.perp
@@ -741,6 +755,28 @@ def _available_spot_balance_from_rows(rows: list, base_coin: str) -> Optional[fl
             if available is not None:
                 return available
     return None
+
+
+def _perp_position_from_rows(rows: list, symbol: str) -> Optional[float]:
+    total = 0.0
+    found = False
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        row_symbol = row.get("symbol") or row.get("instId")
+        if row_symbol is not None and row_symbol != symbol:
+            continue
+        size = _first_float(row, ["total", "holdVol", "pos", "size", "quantity"])
+        if size is None:
+            continue
+        side = str(row.get("holdSide") or row.get("posSide") or "").lower()
+        if side in {"short", "sell"}:
+            size = -abs(size)
+        elif side in {"long", "buy"}:
+            size = abs(size)
+        total += size
+        found = True
+    return total if found else None
 
 
 def _safe_ts(value: Any) -> float | None:
