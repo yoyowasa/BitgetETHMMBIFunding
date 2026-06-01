@@ -2601,3 +2601,35 @@ ec1b00a  chore: bulk update after lint & format
 ### 未確定点
 - private WS の fill/positions store が空になる根本原因は未確定。
 - 修正後の live 再検証は未実施。次の live は XRPUSDT 15分以下に限定し、REST fallback / `open_delta_without_hedge_ticket` を重点監視する。
+
+---
+
+## 2026-06-01 XRPUSDT 修正後 live 15分 / REST flat 判定補正
+
+### 観測事実
+- `SYMBOL=XRPUSDT` live 15分: `runtime_logs\live_symbol_XRPUSDT_after_rest_fallback_15min_20260601_221640`。
+- live 15分: `HALTED=0`、`order_reject=0`、`fill_parse_warning=0`、`resp_code 22002=0`、`shutdown_cancel_all_done=1`、`shutdown_cancel_all_failed=0`。
+- `runtime_log_dir_identity=1`、`startup_cancel_all_done=1`、`startup_open_spot_balance_detected=0`。
+- `book_rx_rate=14`、`fill_monitor_heartbeat=15`、`positions_monitor_heartbeat=14`。
+- `QUOTE_ASK order_new=318`、`order_cancel=318`、実 fill は未発生。
+- 終了後 read-only: `SPOT open orders=0`、`Futures open orders=0`、`Futures XRPUSDT position=0.0`、`SPOT XRP available=0.000046`、`SPOT XRP frozen=0.0`。
+- Bitget REST `/api/v2/mix/position/single-position` は flat 時に `data=[]` を返す。
+
+### 推論
+- 修正後 15分では残留・reject・HALTED は再発していない。
+- ただし `data=[]` を `None` 扱いしていたため、flat 時の REST fallback が authoritative sync にならなかった。
+
+### 実装
+- `bot/exchange/bitget_gateway.py`
+  - empty REST position rows を `0.0` として扱うよう補正。
+- `tests/test_startup_reconciliation.py`
+  - empty REST position rows が flat になる test を追加。
+
+### 検証
+- `.venv\Scripts\python.exe -m pytest -q tests\test_startup_reconciliation.py`: `5 passed`。
+- `.venv\Scripts\python.exe -m pytest -q`: `105 passed`。
+- read-only helper: `get_perp_position=0.0`。
+- `git diff -- config.yaml`: 差分なし。
+
+### 未確定点
+- 実 fill 発生時の `positions_rest_fallback` / `open_delta_without_hedge_ticket` は未確認。

@@ -13,6 +13,7 @@ from bot.config import (
     SymbolConfig,
     SymbolsConfig,
 )
+from bot.exchange.bitget_gateway import _perp_position_from_rows
 from bot.oms.oms import OMS
 from bot.risk.guards import RiskGuards
 
@@ -151,3 +152,7 @@ def test_positions_sync_uses_rest_fallback_when_ws_store_empty() -> None:
     assert oms.positions.perp_pos == -46.0
     assert logger.records[-1]["reason"] == "positions_rest_fallback"
     assert logger.records[-1]["positions_empty"] is True
+
+
+def test_empty_rest_position_rows_mean_flat() -> None:
+    assert _perp_position_from_rows([], "XRPUSDT") == 0.0

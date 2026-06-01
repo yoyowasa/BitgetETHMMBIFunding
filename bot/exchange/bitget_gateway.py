@@ -758,6 +758,8 @@ def _available_spot_balance_from_rows(rows: list, base_coin: str) -> Optional[fl
 
 
 def _perp_position_from_rows(rows: list, symbol: str) -> Optional[float]:
+    if not rows:
+        return 0.0
     total = 0.0
     found = False
     for row in rows:
