@@ -230,6 +230,18 @@ class BitgetGateway:
         }
         return await self.rest_get("/api/v2/mix/market/current-fund-rate", params=params)
 
+    async def get_spot_last_price(self, symbol: Optional[str] = None) -> Optional[float]:
+        spot_symbol = symbol or self.config.symbols.spot.symbol
+        for path in (
+            "/api/v2/spot/market/tickers",
+            "/api/v2/spot/market/ticker",
+        ):
+            payload = await self.rest_get(path, params={"symbol": spot_symbol})
+            price = _spot_last_price_from_payload(payload, spot_symbol)
+            if price is not None and price > 0:
+                return price
+        return None
+
     async def get_pos_mode(self) -> Optional[str]:
         perp = self.config.symbols.perp
         params = {
@@ -646,6 +658,19 @@ def _find_row(data: dict, key: str, value: str) -> Optional[dict]:
     for row in data.get("data", []) or []:
         if row.get(key) == value:
             return row
+    return None
+
+
+def _spot_last_price_from_payload(payload: dict, symbol: str) -> Optional[float]:
+    data = payload.get("data") if isinstance(payload, dict) else None
+    rows = data if isinstance(data, list) else [data]
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        row_symbol = row.get("symbol")
+        if row_symbol and row_symbol != symbol:
+            continue
+        return _first_float(row, ["lastPr", "last", "close", "price"])
     return None
 
 

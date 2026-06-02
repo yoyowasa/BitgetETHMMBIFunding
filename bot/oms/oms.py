@@ -133,6 +133,7 @@ class OMS:
         self._spot_client_ticket: dict[str, str] = {}
         self._spot_order_ticket: dict[str, str] = {}
         self._hedge_tickets: dict[str, HedgeTicket] = {}
+        self._last_hedge_ticket_done_ts = 0.0
         self._symbol_locks: dict[str, asyncio.Lock] = {}
         self._unhedged_qty = 0.0
         self._unhedged_since: Optional[float] = None
@@ -242,11 +243,16 @@ class OMS:
         now_ts = time.time() if now is None else now
         return now_ts < self._unwind_pending_until
 
+    def recent_hedge_ticket_done(self, now: float | None = None, window_sec: float = 2.0) -> bool:
+        now_ts = time.time() if now is None else now
+        return now_ts - self._last_hedge_ticket_done_ts < window_sec
+
     def clear_unhedged_if_flat_dust(
         self,
         *,
         mid_price: float,
         delta_tolerance: float,
+        delta_tolerance_notional: float = 0.0,
         reason: str,
     ) -> bool:
         if abs(self._unhedged_qty) <= 1e-9:
@@ -256,7 +262,15 @@ class OMS:
         delta = self._positions.spot_pos + self._positions.perp_pos
         if abs(self._positions.perp_pos) > delta_tolerance:
             return False
-        if abs(delta) > delta_tolerance:
+        delta_notional = abs(delta) * mid_price
+        if (
+            abs(delta) > delta_tolerance
+            and (
+                delta_tolerance_notional <= 0
+                or delta_notional > delta_tolerance_notional
+            )
+            and not self._delta_below_min_trade(delta, mid_price)
+        ):
             return False
         before = self._unhedged_qty
         self._unhedged_qty = 0.0
@@ -276,8 +290,9 @@ class OMS:
                 "spot_pos_internal": self._positions.spot_pos,
                 "perp_pos_internal": self._positions.perp_pos,
                 "delta": delta,
-                "delta_notional": abs(delta) * mid_price,
+                "delta_notional": delta_notional,
                 "delta_tolerance": delta_tolerance,
+                "delta_tolerance_notional": delta_tolerance_notional,
             }
         )
         return True
@@ -392,6 +407,10 @@ class OMS:
                     }
                 )
                 return
+            if reason == "open_delta_without_hedge_ticket":
+                await self._sync_positions_once(timeout_sec=0.2)
+                if self._should_skip_open_delta_flatten(spot_bbo, cycle_id, reason):
+                    return
             self.fail_open_tickets("flatten_started")
             await self._cancel_all_quotes_unlocked(reason=reason)
             if not self._gateway.constraints.ready():
@@ -453,6 +472,74 @@ class OMS:
                 ),
                 reason=reason,
             )
+
+    def _should_skip_open_delta_flatten(
+        self,
+        spot_bbo: Optional[book_md.BBO],
+        cycle_id: int,
+        reason: str,
+    ) -> bool:
+        delta = self._positions.spot_pos + self._positions.perp_pos
+        mid_price = None
+        if spot_bbo is not None:
+            mid_price = book_md.calc_mid(spot_bbo)
+        if mid_price is None:
+            mid_price = self._spot_mid()
+        delta_notional = None if mid_price is None else abs(delta) * mid_price
+        skip_reason = None
+        if abs(delta) <= self._config.strategy.delta_tolerance:
+            skip_reason = "below_delta_tolerance"
+        elif (
+            delta_notional is not None
+            and delta_notional <= self._config.strategy.delta_tolerance_notional
+        ):
+            skip_reason = "below_delta_tolerance_notional"
+        elif (
+            mid_price is not None
+            and self._delta_below_min_trade(delta, mid_price)
+        ):
+            skip_reason = "below_min_trade"
+        if skip_reason is None:
+            return False
+        self._orders_logger.log(
+            {
+                "ts": time.time(),
+                "event": "order_skip",
+                "intent": OrderIntent.FLATTEN.value,
+                "source": "oms",
+                "mode": "RUN",
+                "reason": "open_delta_flatten_dust_skipped",
+                "state": "blocked_precheck",
+                "leg": "positions",
+                "cycle_id": cycle_id,
+                "original_reason": reason,
+                "skip_reason": skip_reason,
+                "spot_pos_internal": self._positions.spot_pos,
+                "perp_pos_internal": self._positions.perp_pos,
+                "delta": delta,
+                "mid_price": mid_price,
+                "delta_notional": delta_notional,
+                "delta_tolerance": self._config.strategy.delta_tolerance,
+                "delta_tolerance_notional": self._config.strategy.delta_tolerance_notional,
+                "action_taken": "skip_flatten",
+            }
+        )
+        return True
+
+    def _delta_below_min_trade(self, delta: float, mid_price: float) -> bool:
+        constraints_registry = getattr(self._gateway, "constraints", None)
+        if constraints_registry is None:
+            return False
+        qty = abs(delta)
+        for inst_type in (InstType.SPOT, InstType.USDT_FUTURES):
+            constraints = constraints_registry.get(inst_type)
+            if constraints is None or not constraints.is_ready():
+                continue
+            if qty < constraints.min_qty:
+                return True
+            if constraints.min_notional > 0 and qty * mid_price < constraints.min_notional:
+                return True
+        return False
 
     async def sync_positions(self, timeout_sec: float = 5.0, poll_interval: float = 5.0) -> None:
         while True:
@@ -1066,6 +1153,7 @@ class OMS:
         ticket.filled_qty += event.size
         if ticket.remain <= 1e-9:
             ticket.status = "DONE"
+            self._last_hedge_ticket_done_ts = time.time()
             if self._pnl is not None:
                 perp_signed = ticket.want_qty if ticket.side == Side.SELL else -ticket.want_qty
                 spread_pnl = (event.price - ticket.perp_fill_price) * perp_signed
@@ -1931,8 +2019,10 @@ class OMS:
             return True
 
         diff = actual - internal
-        actual_is_dust = self._spot_qty_below_min_trade(actual)
-        diff_is_dust = self._spot_qty_below_min_trade(diff)
+        actual_dust = await self._spot_qty_below_min_trade(actual)
+        diff_dust = await self._spot_qty_below_min_trade(diff)
+        actual_is_dust = actual_dust["is_dust"]
+        diff_is_dust = diff_dust["is_dust"]
         mismatch = abs(diff) > tolerance and not diff_is_dust
         open_spot_balance = (
             abs(actual) > tolerance
@@ -1955,6 +2045,11 @@ class OMS:
                     "tolerance": tolerance,
                     "actual_is_dust": actual_is_dust,
                     "diff_is_dust": diff_is_dust,
+                    "actual_dust_reason": actual_dust["reason"],
+                    "diff_dust_reason": diff_dust["reason"],
+                    "spot_dust_price": actual_dust["price"],
+                    "spot_min_qty": actual_dust["min_qty"],
+                    "spot_min_notional": actual_dust["min_notional"],
                     "base_coin": base_coin,
                     "perp_pos": perp_pos,
                     "delta": internal + perp_pos,
@@ -1988,6 +2083,11 @@ class OMS:
                 "tolerance": tolerance,
                 "actual_is_dust": actual_is_dust,
                 "diff_is_dust": diff_is_dust,
+                "actual_dust_reason": actual_dust["reason"],
+                "diff_dust_reason": diff_dust["reason"],
+                "spot_dust_price": actual_dust["price"],
+                "spot_min_qty": actual_dust["min_qty"],
+                "spot_min_notional": actual_dust["min_notional"],
                 "base_coin": base_coin,
                 "perp_pos": perp_pos,
                 "delta": internal + perp_pos,
@@ -1997,14 +2097,50 @@ class OMS:
         )
         return action_taken != "halted"
 
-    def _spot_qty_below_min_trade(self, qty: float) -> bool:
+    async def _spot_qty_below_min_trade(self, qty: float) -> dict[str, object]:
         constraints_registry = getattr(self._gateway, "constraints", None)
+        empty = {
+            "is_dust": False,
+            "reason": None,
+            "price": None,
+            "min_qty": None,
+            "min_notional": None,
+        }
         if constraints_registry is None:
-            return False
+            return empty
         constraints = constraints_registry.get(InstType.SPOT)
         if constraints is None or not constraints.is_ready():
-            return False
-        return abs(qty) < constraints.min_qty
+            return empty
+        result = {
+            "is_dust": False,
+            "reason": None,
+            "price": None,
+            "min_qty": constraints.min_qty,
+            "min_notional": constraints.min_notional,
+        }
+        abs_qty = abs(qty)
+        if abs_qty < constraints.min_qty:
+            result["is_dust"] = True
+            result["reason"] = "below_min_qty"
+            return result
+        if constraints.min_notional <= 0:
+            return result
+        price = self._spot_mid()
+        if price is None:
+            getter = getattr(self._gateway, "get_spot_last_price", None)
+            if callable(getter):
+                try:
+                    value = getter(self._config.symbols.spot.symbol)
+                    if hasattr(value, "__await__"):
+                        value = await value
+                    price = None if value is None else float(value)
+                except Exception:
+                    price = None
+        result["price"] = price
+        if price is not None and price > 0 and abs_qty * price < constraints.min_notional:
+            result["is_dust"] = True
+            result["reason"] = "below_min_notional"
+        return result
 
     async def _precheck_spot_flatten_available(
         self,

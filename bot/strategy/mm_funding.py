@@ -550,6 +550,7 @@ class MMFundingStrategy:
             cleared = clear_flat_dust(
                 mid_price=mid_spot,
                 delta_tolerance=self._config.strategy.delta_tolerance,
+                delta_tolerance_notional=self._config.strategy.delta_tolerance_notional,
                 reason="pre_unhedged_check",
             )
             if cleared:
@@ -702,6 +703,46 @@ class MMFundingStrategy:
             and open_hedge_ticket is None
             and not defer_for_unwind(now=now)
         ):
+            recent_hedge_done = getattr(
+                self._oms,
+                "recent_hedge_ticket_done",
+                lambda now=None, window_sec=2.0: False,
+            )
+            if recent_hedge_done(now=now, window_sec=2.0):
+                self._state = StrategyState.HEDGING
+                await self._oms.cancel_all(reason="open_delta_deferred_after_hedge_done")
+                self._decision_logger.log(
+                    {
+                        "ts": now,
+                        "event": "risk",
+                        "intent": "FLATTEN",
+                        "source": "strategy",
+                        "mode": self._state.value,
+                        "reason": "open_delta_deferred_after_hedge_done",
+                        "leg": None,
+                        "cycle_id": self._cycle_id,
+                        "spot_pos": spot_pos,
+                        "perp_pos": perp_pos,
+                        "delta": delta,
+                        "delta_notional": abs(delta) * mid_spot,
+                        "delta_tolerance": self._config.strategy.delta_tolerance,
+                        "delta_tolerance_notional": self._config.strategy.delta_tolerance_notional,
+                        "action_taken": "defer_flatten_cancel_quotes",
+                    }
+                )
+                self._log_decision(
+                    now,
+                    spot_bbo,
+                    perp_bbo,
+                    funding.funding_rate,
+                    basis,
+                    obi_spot,
+                    obi_perp,
+                    target_q,
+                    "open_delta_deferred_after_hedge_done",
+                    tfi,
+                )
+                return
             self._state = StrategyState.FLATTENING
             await self._oms.flatten(
                 spot_bbo,

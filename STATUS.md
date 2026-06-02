@@ -2829,3 +2829,56 @@ ec1b00a  chore: bulk update after lint & format
 ### 未確定点
 - 追加修正後 live で `open_delta_without_hedge_ticket` が抑制されるかは未確認。
 - `ticket_failed=1` の初回 HEDGE pending expiry は別途確認対象。
+
+---
+
+## 2026-06-03 WLDUSDT untradeable dust / hedge fill race 追加修正
+
+### 観測事実
+- WLDUSDT live 15分 `runtime_logs\live_symbol_WLDUSDT_after_untradeable_dust_fix_15min_20260603_005939`
+  - 起動直後に `startup_open_spot_balance_detected` で `HALTED`。
+  - `SPOT WLD available=0.858` は `min_qty=0.01` 以上だが、`min_notional=1.0 USDT` 未満。
+- WLDUSDT live 15分 `runtime_logs\live_symbol_WLDUSDT_after_startup_min_notional_dust_fix_15min_20260603_011848`
+  - startup HALT は解消。
+  - ただし HEDGE 後の fee dust / min-notional dust に対して一部 `open_delta_without_hedge_ticket` FLATTEN が発生。
+- WLDUSDT live 15分 `runtime_logs\live_symbol_WLDUSDT_after_open_delta_dust_guard_15min_20260603_013959`
+  - `open_delta_flatten_dust_skipped=4`、`flat_dust_unhedged_cleared=1`。
+  - 一部 HEDGE 完了直後の fill/position 反映 race で `open_delta` FLATTEN が残存。
+- WLDUSDT live 15分 `runtime_logs\live_symbol_WLDUSDT_after_hedge_done_defer_15min_20260603_015902`
+  - `HALTED=0`、`startup_open_spot_balance_detected=0`、`fill_parse_warning=0`。
+  - `order_new_non000=0`、`resp_codes=00000/43001`。`43001` は cancel のみ。
+  - `resp_code 22002=0`。文字列検索の `22002` は timestamp 誤検出。
+  - `open_delta_without_hedge_ticket` decision 4件は全て `open_delta_flatten_dust_skipped` で実 FLATTEN 注文なし。
+  - `open_delta_deferred_after_hedge_done=43`、`flat_dust_unhedged_cleared=2`。
+  - 終了後 read-only: `SPOT open orders=0`、`Futures open orders=0`、`Futures position=0.0`、`SPOT WLD available=1.58054`、`SPOT WLD frozen=0`。
+
+### 推論
+- WLD の残留は spot fee / min-notional 未満 dust。
+- startup dust 判定は `min_qty` だけでは不十分で、`min_notional` と spot price が必要。
+- HEDGE ticket done 直後は spot fill と positions sync の反映順がずれ、dust delta を全量 FLATTEN と誤認する race がある。
+- `43001` は cancel 対象が約定済み/消滅済みの応答で、今回の reject streak には積まれていない。
+
+### 実装
+- `bot/exchange/bitget_gateway.py`
+  - spot ticker の read-only 価格取得 `get_spot_last_price()` を追加。
+- `bot/oms/oms.py`
+  - startup spot dust 判定に `min_notional` + spot price を追加。
+  - `open_delta_without_hedge_ticket` の OMS 側 dust precheck を追加し、dust FLATTEN を skip。
+  - min-notional dust でも stale `unhedged_qty` を clear できるよう修正。
+  - HEDGE ticket done 直後を検出する `recent_hedge_ticket_done()` を追加。
+- `bot/strategy/mm_funding.py`
+  - HEDGE done 直後の `open_delta` FLATTEN を短時間 defer し、quote cancel に留める。
+  - flat dust clear に `delta_tolerance_notional` を渡す。
+- `tests/test_startup_reconciliation.py`
+  - `min_qty` 以上 / `min_notional` 未満の startup dust test を追加。
+- `tests/test_hedge_ticket_flatten_race.py`
+  - open-delta dust FLATTEN skip、min-notional dust unhedged clear、HEDGE done 直後 defer の tests を追加。
+
+### 検証
+- `.venv\Scripts\python.exe -m pytest -q`: `115 passed`。
+- `git diff -- config.yaml`: 差分なし。
+- live bounded 15分後 read-only: open orders 0 / futures position 0 / WLD dust のみ。
+
+### 未確定点
+- `ticket_failed=2` は残る。HEDGE IOC pending expiry / cancel 43001 の可観測性改善は次の確認対象。
+- WLDUSDT の 15分 PnL は fee / hedge slip 優勢で、収益性はまだ未確定。

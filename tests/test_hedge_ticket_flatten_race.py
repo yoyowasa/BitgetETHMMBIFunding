@@ -52,6 +52,7 @@ class StrategyOMS:
         unwind_pending: bool = False,
         open_ticket: bool = True,
         unhedged_qty: float = 0.02,
+        recent_hedge_done: bool = False,
     ) -> None:
         self.gateway = SimpleNamespace(
             book_ready=True,
@@ -69,6 +70,7 @@ class StrategyOMS:
         self.update_quote_calls: list[dict] = []
         self._defer_flatten = defer_flatten
         self._unwind_pending = unwind_pending
+        self._recent_hedge_done = recent_hedge_done
         deadline = time.time() + (10.0 if defer_flatten else -1.0)
         self._ticket = (
             SimpleNamespace(
@@ -102,6 +104,13 @@ class StrategyOMS:
 
     def should_defer_flatten_for_unwind_pending(self, now: float | None = None) -> bool:
         return self._unwind_pending
+
+    def recent_hedge_ticket_done(
+        self,
+        now: float | None = None,
+        window_sec: float = 2.0,
+    ) -> bool:
+        return self._recent_hedge_done
 
     async def update_quotes(self, **kwargs) -> None:
         self.update_quote_calls.append(kwargs)
@@ -296,6 +305,27 @@ def test_open_delta_without_hedge_ticket_flattens(monkeypatch) -> None:
     ]
     assert oms.update_quote_calls == []
     assert logger.records[-1]["reason"] == "open_delta_without_hedge_ticket"
+
+
+def test_open_delta_defers_right_after_hedge_done(monkeypatch) -> None:
+    oms = StrategyOMS(
+        defer_flatten=False,
+        open_ticket=False,
+        unhedged_qty=0.0,
+        recent_hedge_done=True,
+    )
+    logger = _run_strategy_step(monkeypatch, oms)
+
+    assert oms.flatten_calls == []
+    assert oms.cancel_reasons == ["open_delta_deferred_after_hedge_done"]
+    risks = [
+        record
+        for record in logger.records
+        if record.get("reason") == "open_delta_deferred_after_hedge_done"
+        and record.get("event") == "risk"
+    ]
+    assert risks
+    assert risks[-1]["action_taken"] == "defer_flatten_cancel_quotes"
 
 
 def test_open_delta_fee_dust_notional_does_not_exceed_tolerance() -> None:
@@ -637,6 +667,94 @@ def test_flat_dust_clears_stale_unhedged_qty() -> None:
     ]
     assert risks
     assert risks[-1]["unhedged_qty_before"] == -0.02
+
+
+def test_flat_min_notional_dust_clears_stale_unhedged_qty() -> None:
+    gateway = OMSGateway()
+    gateway.constraints = ConstraintsRegistry(
+        spot=InstrumentConstraints(
+            min_qty=0.01,
+            qty_step=0.01,
+            min_notional=1.0,
+            tick_size=0.0001,
+        ),
+        perp=InstrumentConstraints(
+            min_qty=1.0,
+            qty_step=1.0,
+            min_notional=1.0,
+            tick_size=0.0001,
+        ),
+    )
+    orders_logger = CapturingLogger()
+    oms = OMS(
+        gateway,
+        _config(),
+        risk=None,
+        orders_logger=orders_logger,
+        fills_logger=CapturingLogger(),
+    )
+    oms.positions.spot_pos = 0.716
+    oms.positions.perp_pos = 0.0
+    oms._unhedged_qty = 146.0
+    oms._unhedged_since = time.time() - 10.0
+
+    cleared = oms.clear_unhedged_if_flat_dust(
+        mid_price=0.41025,
+        delta_tolerance=0.01,
+        delta_tolerance_notional=0.2,
+        reason="test",
+    )
+
+    assert cleared is True
+    assert oms.unhedged_qty == 0.0
+    assert orders_logger.records[-1]["reason"] == "flat_dust_unhedged_cleared"
+    assert orders_logger.records[-1]["delta"] == 0.716
+
+
+def test_open_delta_flatten_skips_notional_dust_before_orders() -> None:
+    gateway = OMSGateway()
+    gateway.constraints = ConstraintsRegistry(
+        spot=InstrumentConstraints(
+            min_qty=0.01,
+            qty_step=0.01,
+            min_notional=1.0,
+            tick_size=0.0001,
+        ),
+        perp=InstrumentConstraints(
+            min_qty=1.0,
+            qty_step=1.0,
+            min_notional=1.0,
+            tick_size=0.0001,
+        ),
+    )
+    orders_logger = CapturingLogger()
+    oms = OMS(
+        gateway,
+        _config(),
+        risk=None,
+        orders_logger=orders_logger,
+        fills_logger=CapturingLogger(),
+    )
+    oms.positions.spot_pos = 145.854
+    oms.positions.perp_pos = -146.0
+    spot_bbo = SimpleNamespace(bid=0.4113, ask=0.4115)
+
+    asyncio.run(
+        oms.flatten(
+            spot_bbo,
+            cycle_id=255,
+            reason="open_delta_without_hedge_ticket",
+        )
+    )
+
+    assert gateway.orders == []
+    skips = [
+        record
+        for record in orders_logger.records
+        if record.get("reason") == "open_delta_flatten_dust_skipped"
+    ]
+    assert skips
+    assert skips[-1]["skip_reason"] == "below_delta_tolerance_notional"
 
 
 def test_flatten_skips_futures_order_when_position_sync_reports_flat() -> None:
