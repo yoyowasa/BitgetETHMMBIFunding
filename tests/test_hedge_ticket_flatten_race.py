@@ -706,6 +706,49 @@ def test_reduce_only_22002_syncs_flat_without_reject_streak() -> None:
     ]
 
 
+def test_post_only_quote_45001_does_not_increment_reject_streak() -> None:
+    gateway = OMSGateway(place_order_response={"code": "45001", "msg": "Unknown error"})
+    orders_logger = CapturingLogger()
+    risk = RiskGuards(_config().risk)
+    oms = OMS(
+        gateway,
+        _config(),
+        risk=risk,
+        orders_logger=orders_logger,
+        fills_logger=CapturingLogger(),
+    )
+
+    asyncio.run(
+        oms._submit_order(
+            OrderRequest(
+                inst_type=InstType.USDT_FUTURES,
+                symbol="ETHUSDT",
+                side=Side.SELL,
+                order_type=OrderType.LIMIT,
+                size=0.02,
+                force=Force.POST_ONLY,
+                client_oid="QUOTE_ASK-test",
+                intent=OrderIntent.QUOTE_ASK,
+                cycle_id=1,
+                price=100.0,
+            ),
+            reason="quote",
+        )
+    )
+
+    assert risk.reject_streak == 0
+    assert [
+        record for record in orders_logger.records if record.get("reason") == "order_reject"
+    ] == []
+    skipped = [
+        record
+        for record in orders_logger.records
+        if record.get("reason") == "post_only_quote_reject_skipped"
+    ]
+    assert skipped
+    assert skipped[-1]["action_taken"] == "skip_reject_streak"
+
+
 def test_spot_hedge_price_payload_uses_decimal_tick_format() -> None:
     gateway = OMSGateway()
     orders_logger = CapturingLogger()

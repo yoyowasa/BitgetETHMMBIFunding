@@ -1369,6 +1369,34 @@ class OMS:
         self._orders_logger.log(record)
         if await self._handle_reduce_only_no_position(req, response, resp_code, price_before_round, price_tick, price_place):
             return None
+        if self._is_post_only_quote_reject(req, resp_code):
+            self._orders_logger.log(
+                {
+                    "ts": time.time(),
+                    "event": "risk",
+                    "intent": req.intent.value,
+                    "source": "oms",
+                    "mode": "RUN",
+                    "reason": "post_only_quote_reject_skipped",
+                    "leg": None,
+                    "cycle_id": req.cycle_id,
+                    "resp_code": resp_code,
+                    "response_msg": response.get("msg"),
+                    "inst_type": req.inst_type.value,
+                    "symbol": req.symbol,
+                    "side": req.side.value,
+                    "size": req.size,
+                    "client_oid": req.client_oid,
+                    "price": req.price,
+                    "price_before_round": price_before_round,
+                    "price_after_round": req.price,
+                    "price_payload": price_payload,
+                    "tick_size": price_tick if price_tick is not None else constraints.tick_size,
+                    "pricePlace": price_place,
+                    "action_taken": "skip_reject_streak",
+                }
+            )
+            return None
         if self._risk is not None:
             ok = str(resp_code) == "00000"
             streak = self._risk.record_order_result(ok)
@@ -1423,6 +1451,15 @@ class OMS:
         if order_id:
             self._order_client_map[order_id] = req.client_oid
         return order_id
+
+    @staticmethod
+    def _is_post_only_quote_reject(req: OrderRequest, resp_code: object) -> bool:
+        return (
+            str(resp_code) == "45001"
+            and req.force == Force.POST_ONLY
+            and req.order_type == OrderType.LIMIT
+            and req.intent in (OrderIntent.QUOTE_BID, OrderIntent.QUOTE_ASK)
+        )
 
     async def _handle_reduce_only_no_position(
         self,

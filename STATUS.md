@@ -2668,3 +2668,72 @@ ec1b00a  chore: bulk update after lint & format
 
 ### 未確定点
 - 修正後 live で HEDGE spot IOC が実際に約定するかは未確認。
+
+---
+
+## 2026-06-02 18:13 JST B案 latent replay / daily stopなし仮定
+
+### 観測事実
+- 対象ログ:
+  - `runtime_logs\live_symbol_XRPUSDT_after_hedge_ioc_fix_15min_20260602_164429`
+  - `runtime_logs\live_symbol_XRPUSDT_after_hedge_ioc_fix_30min_20260602_170049`
+  - `runtime_logs\live_symbol_XRPUSDT_after_hedge_ioc_fix_60min_20260602_173149`
+- 追加: `scripts\analyze_latent_replay.py`
+  - `QUOTE_ASK` active中に `trade_side=buy` かつ `trade_px >= quote_price` を latent fill として抽出。
+  - entry は futures ask quote、hedge は fill後5秒以降の `mid_spot` 優先proxy、cost は perp maker `1.4bps` + spot taker `10bps` + slippage `2bps`。
+  - `latent_fills.csv`、`prefix_summary.csv`、`latent_replay.sqlite`、`RESULT_LATENT_REPLAY.md` を出力。
+- 検証結果:
+  - 15分: `quotes=376`、`latent_fills=0`、`active_buy_rows=81`、`min_active_ask_gap_bps=10.2475`
+  - 30分: `quotes=698`、`latent_fills=0`、`active_buy_rows=247`、`min_active_ask_gap_bps=8.6881`
+  - 60分途中: `quotes=649`、`latent_fills=0`、`active_buy_rows=710`、`min_active_ask_gap_bps=3.9560`
+- `orders.jsonl` 集計でも実fillイベントは未検出。`pnl.jsonl` tail は `net_pnl=0.0`。
+- `config.yaml` に daily stop / stop loss / drawdown limit 設定は未検出。
+
+### 推論
+- 現ログ定義では、今日の latent 17件は再現しない。別ログまたは別定義の可能性が高い。
+- B案単体は10 trades未達のため判断保留。
+- daily stopなし仮定の仮想結果は、latent fillが0件のため `net=0`、停止後latent損益も `0`。
+
+### 検証
+- `.venv\Scripts\python.exe -m py_compile .\scripts\analyze_latent_replay.py`: 成功。
+- `.venv\Scripts\python.exe .\scripts\analyze_latent_replay.py <log_dir> --cuts 10,30,50`: 3ログで成功。
+
+### 未確定点
+- `latent 17件` の元定義・元ログは未特定。
+- 60分ログは18:13時点で書き込み継続中のため途中集計。
+
+---
+
+## 2026-06-02 XRPUSDT HEDGE IOC 修正後 live 15分/30分/60分
+
+### 観測事実
+- 15分: `runtime_logs\live_symbol_XRPUSDT_after_hedge_ioc_fix_15min_20260602_164429`
+  - `HALTED=0`、`order_reject=0`、`fill_parse_warning=0`、`shutdown_cancel_all_done=1`、実 fill `0`。
+  - 終了後 read-only: `SPOT open orders=0`、`Futures open orders=0`、`Futures XRPUSDT position=0.0`、`SPOT XRP frozen=0.0`。
+- 30分: `runtime_logs\live_symbol_XRPUSDT_after_hedge_ioc_fix_30min_20260602_170049`
+  - `HALTED=0`、`order_reject=0`、`fill_parse_warning=0`、`shutdown_cancel_all_done=1`、実 fill `0`。
+  - 終了後 read-only: `SPOT open orders=0`、`Futures open orders=0`、`Futures XRPUSDT position=0.0`、`SPOT XRP frozen=0.0`。
+- 60分: `runtime_logs\live_symbol_XRPUSDT_after_hedge_ioc_fix_60min_20260602_173149`
+  - `HALTED=0`、`fill_parse_warning=0`、`shutdown_cancel_all_done=1`、実 fill `0`。
+  - `QUOTE_ASK post_only` 新規で `resp_code=45001` が `38` 件。Bitget response msg は `Unknown error`。
+  - 終了後 read-only: `SPOT open orders=0`、`Futures open orders=0`、`Futures XRPUSDT position=0.0`、`SPOT XRP frozen=0.0`。
+
+### 推論
+- HEDGE IOC 修正後の bounded live は安全終了。残留・position drift は再発していない。
+- 実 fill が出ていないため、HEDGE spot IOC の実約定パスは未確認。
+- `45001` は `QUOTE_* post_only` の maker post race として扱うのが妥当。通常の risk reject / reject streak に積むと live 判定が汚れる。
+
+### 実装
+- `bot/oms/oms.py`
+  - `QUOTE_BID` / `QUOTE_ASK` の `post_only` limit で `resp_code=45001` の場合、`post_only_quote_reject_skipped` としてログし、reject streak に積まない。
+- `tests/test_hedge_ticket_flatten_race.py`
+  - `post_only` quote `45001` が `order_reject` を出さず、`reject_streak=0` のままになる test を追加。
+
+### 検証
+- `.venv\Scripts\python.exe -m pytest -q tests\test_hedge_ticket_flatten_race.py`: `16 passed`。
+- `.venv\Scripts\python.exe -m pytest -q`: `107 passed`。
+- `git diff -- config.yaml`: 差分なし。
+
+### 未確定点
+- 修正後 live で `post_only_quote_reject_skipped` になるかは未確認。
+- HEDGE spot IOC の実約定パスは未確認。
