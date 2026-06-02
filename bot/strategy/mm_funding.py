@@ -1186,7 +1186,25 @@ class MMFundingStrategy:
             return False
         if abs(delta) * mid_price <= self._config.strategy.delta_tolerance_notional:
             return False
+        if self._delta_below_min_trade(delta, mid_price):
+            return False
         return True
+
+    def _delta_below_min_trade(self, delta: float, mid_price: float) -> bool:
+        gateway = getattr(self._oms, "gateway", None)
+        constraints_registry = getattr(gateway, "constraints", None)
+        if constraints_registry is None:
+            return False
+        qty = abs(delta)
+        for inst_type in (InstType.SPOT, InstType.USDT_FUTURES):
+            constraints = constraints_registry.get(inst_type)
+            if constraints is None or not constraints.is_ready():
+                continue
+            if qty < constraints.min_qty:
+                return True
+            if constraints.min_notional > 0 and qty * mid_price < constraints.min_notional:
+                return True
+        return False
 
     def _quote_size_after_constraints(self, size: float) -> float:
         constraints_registry = getattr(self._oms.gateway, "constraints", None)

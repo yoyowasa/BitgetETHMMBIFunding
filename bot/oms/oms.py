@@ -1931,8 +1931,14 @@ class OMS:
             return True
 
         diff = actual - internal
-        mismatch = abs(diff) > tolerance
-        open_spot_balance = abs(actual) > tolerance and abs(internal) <= tolerance
+        actual_is_dust = self._spot_qty_below_min_trade(actual)
+        diff_is_dust = self._spot_qty_below_min_trade(diff)
+        mismatch = abs(diff) > tolerance and not diff_is_dust
+        open_spot_balance = (
+            abs(actual) > tolerance
+            and abs(internal) <= tolerance
+            and not actual_is_dust
+        )
         if not mismatch and not open_spot_balance:
             self._orders_logger.log(
                 {
@@ -1947,6 +1953,8 @@ class OMS:
                     "actual_spot_available": actual,
                     "diff": diff,
                     "tolerance": tolerance,
+                    "actual_is_dust": actual_is_dust,
+                    "diff_is_dust": diff_is_dust,
                     "base_coin": base_coin,
                     "perp_pos": perp_pos,
                     "delta": internal + perp_pos,
@@ -1978,6 +1986,8 @@ class OMS:
                 "actual_spot_available": actual,
                 "diff": diff,
                 "tolerance": tolerance,
+                "actual_is_dust": actual_is_dust,
+                "diff_is_dust": diff_is_dust,
                 "base_coin": base_coin,
                 "perp_pos": perp_pos,
                 "delta": internal + perp_pos,
@@ -1986,6 +1996,15 @@ class OMS:
             }
         )
         return action_taken != "halted"
+
+    def _spot_qty_below_min_trade(self, qty: float) -> bool:
+        constraints_registry = getattr(self._gateway, "constraints", None)
+        if constraints_registry is None:
+            return False
+        constraints = constraints_registry.get(InstType.SPOT)
+        if constraints is None or not constraints.is_ready():
+            return False
+        return abs(qty) < constraints.min_qty
 
     async def _precheck_spot_flatten_available(
         self,

@@ -13,6 +13,7 @@ from bot.config import (
     SymbolConfig,
     SymbolsConfig,
 )
+from bot.exchange.constraints import ConstraintsRegistry, InstrumentConstraints
 from bot.exchange.bitget_gateway import _perp_position_from_rows
 from bot.oms.oms import OMS
 from bot.risk.guards import RiskGuards
@@ -27,10 +28,24 @@ class CapturingLogger:
 
 
 class DummyGateway:
-    def __init__(self, available: float | None, *, perp_position: float | None = None) -> None:
+    def __init__(
+        self,
+        available: float | None,
+        *,
+        perp_position: float | None = None,
+        spot_min_qty: float = 0.0001,
+    ) -> None:
         self.available = available
         self.perp_position = perp_position
         self.store = SimpleNamespace(positions=SimpleNamespace(find=lambda: []))
+        self.constraints = ConstraintsRegistry(
+            spot=InstrumentConstraints(
+                min_qty=spot_min_qty,
+                qty_step=0.0001,
+                min_notional=0.0,
+                tick_size=0.01,
+            )
+        )
 
     async def get_spot_available_balance(self, base_coin: str) -> float | None:
         assert base_coin == "ETH"
@@ -84,13 +99,18 @@ def _oms(
     *,
     dry_run: bool = False,
     perp_position: float | None = None,
+    spot_min_qty: float = 0.0001,
 ) -> tuple[OMS, RiskGuards, CapturingLogger]:
     config = _config(dry_run=dry_run)
     risk = RiskGuards(config.risk)
     logger = CapturingLogger()
     return (
         OMS(
-            DummyGateway(available, perp_position=perp_position),
+            DummyGateway(
+                available,
+                perp_position=perp_position,
+                spot_min_qty=spot_min_qty,
+            ),
             config,
             risk=risk,
             orders_logger=logger,
@@ -142,6 +162,19 @@ def test_startup_reconciliation_passes_when_actual_matches_internal_within_toler
     assert not risk.is_halted()
     assert logger.records[-1]["reason"] == "startup_spot_balance_reconciled"
     assert abs(logger.records[-1]["diff"] - -0.000059999282) < 1e-12
+
+
+def test_startup_reconciliation_ignores_spot_dust_below_min_trade() -> None:
+    oms, risk, logger = _oms(0.858, dry_run=False, spot_min_qty=1.0)
+
+    ok = asyncio.run(
+        oms.reconcile_startup_spot_balance(tolerance=0.01, dry_run=False)
+    )
+
+    assert ok is True
+    assert not risk.is_halted()
+    assert logger.records[-1]["reason"] == "startup_spot_balance_reconciled"
+    assert logger.records[-1]["actual_is_dust"] is True
 
 
 def test_positions_sync_uses_rest_fallback_when_ws_store_empty() -> None:

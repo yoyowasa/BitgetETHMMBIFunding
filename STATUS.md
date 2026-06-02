@@ -2787,3 +2787,45 @@ ec1b00a  chore: bulk update after lint & format
 ### 未確定点
 - 修正後 live で WLD の HEDGE 後に inventory を維持し、即 FLATTEN しないことは未確認。
 - funding 1bps 環境では edge が薄いため、実収益化は fill 後の保持/UNWIND パス再検証が必要。
+
+---
+
+## 2026-06-03 WLDUSDT fee dust 修正後 live 再確認と追加修正
+
+### 観測事実
+- 修正 commit `4c7bf52 fix: tolerate spot fee dust after hedges` を push 済み。
+- WLDUSDT DRY 15分 `runtime_logs\dry_symbol_WLDUSDT_after_fee_dust_fix_15min_20260603_000509`
+  - `HALTED=0`、`order_reject=0`、`fill_parse_warning=0`、`order_new=503`、`order_cancel=503`。
+  - `open_delta_without_hedge_ticket=0`、`shutdown_cancel_all_done=1`。
+- WLDUSDT live 15分 `runtime_logs\live_symbol_WLDUSDT_after_fee_dust_fix_15min_20260603_002103`
+  - `HALTED=0`、`order_reject=0`、`fill_parse_warning=0`、`shutdown_cancel_all_done=1`。
+  - 実 fill `16`: `QUOTE_ASK=4`、`QUOTE_BID=1`、`HEDGE=6`、`FLATTEN futures=3`、`FLATTEN spot=2`。
+  - `ticket_done=4`、`ticket_failed=1`。
+  - `open_delta_without_hedge_ticket=841`、`spot_flatten_available_precheck=841`。
+  - 終了後 read-only: `SPOT open orders=0`、`Futures open orders=0`、`Futures position=0.0`、`SPOT WLD available=0.858`、`SPOT WLD frozen=0`。
+
+### 推論
+- notional dust 許容だけでは不十分。
+- `0.854 WLD` 程度の残留は約 `0.34 USDT` だが、spot constraints で `blocked_constraints` となり、BOT からは清算不能 dust。
+- 清算不能 dust に対して `open_delta_without_hedge_ticket` が毎 cycle 発火し、FLATTEN skip が連発している。
+- 起動時も `SPOT WLD available=0.858` は `delta_tolerance=0.01` を超えるため、最小取引数量未満 dust を考慮しないと live 再起動で誤 halt する。
+
+### 実装
+- `bot/strategy/mm_funding.py`
+  - `_delta_below_min_trade()` を追加。
+  - spot / futures constraints の `min_qty` / `min_notional` 未満の delta は `open_delta_without_hedge_ticket` 対象外にする。
+- `bot/oms/oms.py`
+  - `reconcile_startup_spot_balance()` で spot constraints の `min_qty` 未満残高を dust として扱い、live 起動時の誤 halt を避ける。
+- `tests/test_hedge_ticket_flatten_race.py`
+  - min trade 未満 delta が FLATTEN 対象外になる test を追加。
+- `tests/test_startup_reconciliation.py`
+  - min trade 未満 spot dust が startup halt にならない test を追加。
+
+### 検証
+- `.venv\Scripts\python.exe -m pytest -q tests\test_hedge_ticket_flatten_race.py tests\test_startup_reconciliation.py tests\test_pnl_logger.py`: `26 passed`。
+- `.venv\Scripts\python.exe -m pytest -q`: `111 passed`。
+- `git diff -- config.yaml`: 差分なし。
+
+### 未確定点
+- 追加修正後 live で `open_delta_without_hedge_ticket` が抑制されるかは未確認。
+- `ticket_failed=1` の初回 HEDGE pending expiry は別途確認対象。

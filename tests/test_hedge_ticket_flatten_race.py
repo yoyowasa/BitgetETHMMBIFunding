@@ -311,6 +311,34 @@ def test_open_delta_fee_dust_notional_does_not_exceed_tolerance() -> None:
     assert strategy._open_delta_exceeds_tolerance(-0.144, 2.0) is True
 
 
+def test_open_delta_below_min_trade_does_not_exceed_tolerance() -> None:
+    constraints = ConstraintsRegistry(
+        spot=InstrumentConstraints(
+            min_qty=1.0,
+            qty_step=0.01,
+            min_notional=0.0,
+            tick_size=0.0001,
+        ),
+        perp=InstrumentConstraints(
+            min_qty=1.0,
+            qty_step=0.01,
+            min_notional=0.0,
+            tick_size=0.0001,
+        ),
+    )
+    oms = SimpleNamespace(gateway=SimpleNamespace(constraints=constraints))
+    strategy = MMFundingStrategy(
+        _config(),
+        SimpleNamespace(last=None),
+        oms,
+        DummyRisk(),
+        CapturingLogger(),
+    )
+
+    assert strategy._open_delta_exceeds_tolerance(0.854, 0.40325) is False
+    assert strategy._open_delta_exceeds_tolerance(1.1, 0.40325) is True
+
+
 def test_unhedged_exceeded_flattens_after_hedge_deadline(monkeypatch) -> None:
     oms = StrategyOMS(defer_flatten=False)
     logger = _run_strategy_step(monkeypatch, oms)
