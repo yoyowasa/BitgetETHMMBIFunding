@@ -827,7 +827,7 @@ class OMS:
                 }
             )
         if self._pnl is not None:
-            self._pnl.record_fees(abs(event.fee))
+            self._pnl.record_fees(_fee_notional_usdt(event))
         if intent == OrderIntent.HEDGE or ticket_id is not None:
             self._apply_hedge_fill(event, ticket_id)
             return
@@ -2292,6 +2292,18 @@ def _spot_position_delta_after_fee(event: ExecutionEvent) -> float:
     if event.side == Side.BUY:
         return event.size - fee_size
     return -event.size - fee_size
+
+
+def _fee_notional_usdt(event: ExecutionEvent) -> float:
+    fee = abs(event.fee)
+    if fee == 0:
+        return 0.0
+    if event.fee_coin and event.fee_coin.upper() == "USDT":
+        return fee
+    base_coin = _base_coin_from_symbol(event.symbol)
+    if event.fee_coin and event.fee_coin.upper() == base_coin.upper():
+        return fee * event.price
+    return fee
 
 
 def _base_coin_from_symbol(symbol: str) -> str:

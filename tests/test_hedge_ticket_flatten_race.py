@@ -298,6 +298,19 @@ def test_open_delta_without_hedge_ticket_flattens(monkeypatch) -> None:
     assert logger.records[-1]["reason"] == "open_delta_without_hedge_ticket"
 
 
+def test_open_delta_fee_dust_notional_does_not_exceed_tolerance() -> None:
+    strategy = MMFundingStrategy(
+        _config(),
+        SimpleNamespace(last=None),
+        SimpleNamespace(),
+        DummyRisk(),
+        CapturingLogger(),
+    )
+
+    assert strategy._open_delta_exceeds_tolerance(-0.144, 0.416) is False
+    assert strategy._open_delta_exceeds_tolerance(-0.144, 2.0) is True
+
+
 def test_unhedged_exceeded_flattens_after_hedge_deadline(monkeypatch) -> None:
     oms = StrategyOMS(defer_flatten=False)
     logger = _run_strategy_step(monkeypatch, oms)

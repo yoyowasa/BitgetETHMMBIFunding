@@ -77,6 +77,7 @@ class StrategyConfig:
     target_inventory_max_ratio: float = 1.0
     funding_window_sec: float = 300.0
     min_half_spread_bps: float = 8.0
+    delta_tolerance_notional: float = 0.2
     dry_run: bool = False
 
 

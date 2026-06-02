@@ -2737,3 +2737,53 @@ ec1b00a  chore: bulk update after lint & format
 ### 未確定点
 - 修正後 live で `post_only_quote_reject_skipped` になるかは未確認。
 - HEDGE spot IOC の実約定パスは未確認。
+
+---
+
+## 2026-06-02 WLDUSDT 実約定パス確認と fee dust 修正
+
+### 観測事実
+- DOGEUSDT bounded live:
+  - 15分 `runtime_logs\live_symbol_DOGEUSDT_after_xrp_funding_drop_15min_20260602_223109`
+    - `HALTED=0`、`order_reject=0`、`fill=0`、`shutdown_cancel_all_done=1`。
+    - 終了後 read-only: `SPOT open orders=0`、`Futures open orders=0`、`Futures position=0.0`、`SPOT DOGE available=0.000006`。
+  - 30分 `runtime_logs\live_symbol_DOGEUSDT_after_xrp_funding_drop_30min_20260602_225140`
+    - `HALTED=0`、`order_reject=0`、`fill=0`、`shutdown_cancel_all_done=1`。
+    - 終了後 read-only: `SPOT open orders=0`、`Futures open orders=0`、`Futures position=0.0`。
+- WLDUSDT:
+  - DRY 15分 `runtime_logs\dry_symbol_WLDUSDT_profitability_candidate_15min_20260602_232634`
+    - `HALTED=0`、`order_reject=0`、`constraints_loaded=15`、`order_new=533`、`shutdown_cancel_all_done=1`。
+  - live 15分 `runtime_logs\live_symbol_WLDUSDT_profitability_candidate_15min_20260602_234233`
+    - `HALTED=0`、`order_reject=0`、`fill_parse_warning=0`、`shutdown_cancel_all_done=1`。
+    - 実 fill `26`: `QUOTE_ASK=4`、`HEDGE=7`、`FLATTEN futures=7`、`FLATTEN spot=8`。
+    - `ticket_done=4`、`ticket_failed=0`。
+    - `open_delta_without_hedge_ticket=8`。
+    - 終了後 read-only: `SPOT open orders=0`、`Futures open orders=0`、`Futures position=0.0`、`SPOT WLD available=0.004`、`SPOT WLD frozen=0`。
+
+### 推論
+- WLD の `HEDGE` spot IOC は実約定した。
+- ただし spot fee が base coin `WLD` で引かれ、例: `buy 144 WLD` 後に spot 実増加が約 `143.856 WLD` になる。
+- `delta=-0.144 WLD` は約 `0.06 USDT` の dust だが、従来の `delta_tolerance=0.01 WLD` を超え、`open_delta_without_hedge_ticket` が誤発火して全量 FLATTEN した。
+- PnL logger も base coin fee `0.144 WLD` を `0.144 USDT` として加算し、fee / net_pnl を過大悪化させていた。
+
+### 実装
+- `bot/config.py`
+  - `StrategyConfig.delta_tolerance_notional` を追加。デフォルト `0.2 USDT`。`config.yaml` は変更なし。
+- `bot/strategy/mm_funding.py`
+  - `_open_delta_exceeds_tolerance()` を追加。
+  - `open_delta_without_hedge_ticket` と HEDGING 幅拡大判定で、base数量だけでなく notional dust を許容。
+- `bot/oms/oms.py`
+  - spot fee が base coin の場合、PnL fee を `abs(fee) * price` で USDT 換算。
+- `tests/test_hedge_ticket_flatten_race.py`
+  - WLD fee dust 相当の delta が notional tolerance 内なら FLATTEN 対象外になる test を追加。
+- `tests/test_pnl_logger.py`
+  - base coin fee の USDT 換算 test を追加。
+
+### 検証
+- `.venv\Scripts\python.exe -m pytest -q tests\test_hedge_ticket_flatten_race.py tests\test_pnl_logger.py`: `19 passed`。
+- `.venv\Scripts\python.exe -m pytest -q`: `109 passed`。
+- `git diff -- config.yaml`: 差分なし。
+
+### 未確定点
+- 修正後 live で WLD の HEDGE 後に inventory を維持し、即 FLATTEN しないことは未確認。
+- funding 1bps 環境では edge が薄いため、実収益化は fill 後の保持/UNWIND パス再検証が必要。

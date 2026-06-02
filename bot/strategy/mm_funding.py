@@ -697,7 +697,7 @@ class MMFundingStrategy:
             lambda now=None: False,
         )
         if (
-            abs(delta) > self._config.strategy.delta_tolerance
+            self._open_delta_exceeds_tolerance(delta, mid_spot)
             and abs(unhedged_qty_now) <= 1e-9
             and open_hedge_ticket is None
             and not defer_for_unwind(now=now)
@@ -736,7 +736,9 @@ class MMFundingStrategy:
         else:
             bid_funding_adjust = min(0.0, funding_skew_bps)
             ask_funding_adjust = -min(0.0, funding_skew_bps)
-        if abs(self._oms.unhedged_qty) > 0 or abs(delta) > self._config.strategy.delta_tolerance:
+        if abs(self._oms.unhedged_qty) > 0 or self._open_delta_exceeds_tolerance(
+            delta, mid_spot
+        ):
             half_bps += self._config.strategy.base_half_spread_bps
             self._state = StrategyState.HEDGING
         else:
@@ -1178,6 +1180,13 @@ class MMFundingStrategy:
             "cost_bps": cost_bps,
             "adverse_buffer_bps": adverse_buffer_bps,
         }
+
+    def _open_delta_exceeds_tolerance(self, delta: float, mid_price: float) -> bool:
+        if abs(delta) <= self._config.strategy.delta_tolerance:
+            return False
+        if abs(delta) * mid_price <= self._config.strategy.delta_tolerance_notional:
+            return False
+        return True
 
     def _quote_size_after_constraints(self, size: float) -> float:
         constraints_registry = getattr(self._oms.gateway, "constraints", None)
