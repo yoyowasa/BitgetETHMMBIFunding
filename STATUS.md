@@ -3038,3 +3038,48 @@ ec1b00a  chore: bulk update after lint & format
 ### 未確定点
 - shutdown flatten 追加後の live bounded 再確認は未実施。
 - wide22 は fill 後も net PnL が改善したか、次回 shutdown flatten 付き live bounded 15分で再評価する。
+
+---
+
+## 2026-06-03 shutdown flatten 付き WLDUSDT live bounded 15分 再確認
+
+### 観測事実
+- commit `fd7fc9a fix: flatten positions on bounded shutdown` push 後に live bounded 15分を再実行。
+- 実行 env:
+  - `SYMBOL=WLDUSDT`
+  - `BASE_HALF_SPREAD_BPS=22`
+  - `MIN_HALF_SPREAD_BPS=22`
+  - `DRY_RUN=0`
+  - `REAL_RUN_OK=1`
+- live 15分 log: `runtime_logs\live_symbol_WLDUSDT_wide22_shutdown_flatten_15min_20260603_132329`
+  - `HALTED=0`
+  - `order_reject=0`
+  - `fill_parse_warning=0`
+  - `resp_code 22002=0`
+  - `shutdown_cancel_all_done=2`
+  - `shutdown_cancel_all_failed=0`
+  - `shutdown_flatten_positions_start=1`
+  - `shutdown_flatten_positions_done=1`
+  - `shutdown_flatten_positions_failed=0`
+  - `ticket_failed=0`
+  - `ticket_superseded=0`
+  - fills `0`
+- 終了後 read-only:
+  - `SPOT open orders=0`
+  - `Futures open orders=0`
+  - `Futures WLDUSDT position=0.0`
+  - `SPOT WLD available=0.00354`
+  - `SPOT WLD frozen=0.0`
+
+### 推論
+- bounded runner の shutdown flatten は発火し、残留 position を作らず終了した。
+- 今回は約定なしのため、fill 後の shutdown flatten 再確認はまだ未完了。
+- WLD spot dust が `0.00354` まで低下したため、bid 側の spot available block は継続するが、残留リスクは dust のみ。
+
+### 検証
+- 終了後 read-only で open orders 0 / futures position 0 / spot frozen 0 を確認。
+- `git diff -- config.yaml`: 差分なし。
+
+### 未確定点
+- 実 fill 発生後に `shutdown_flatten_positions` が spot/perp 両脚を完全 flat に戻すかは次回 bounded で継続監視。
+- wide22 の収益性は今回 fills 0 のため評価不可。
