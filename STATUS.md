@@ -3427,3 +3427,112 @@ ec1b00a  chore: bulk update after lint & format
 ### 未確定点
 - side-edge guard の rough net プラス継続性は未確認。
 - 次は 60分 bounded で rough net と shutdown flat を再評価する。
+
+---
+
+## 2026-06-04 WLDUSDT side-edge guard live bounded 60分確認
+
+### 観測事実
+- commit `91d81ff docs: record below-minimum dust live verification` 後に `SIDE_EDGE_GUARD=1` で WLDUSDT wide22 live bounded 60分を実行。
+- live 60分 log: `runtime_logs\live_symbol_WLDUSDT_wide22_side_edge_guard_60min_20260604_024521`
+  - `HALTED=0`
+  - `order_reject=0`
+  - `fill_parse_warning=0`
+  - `startup_open_spot_balance_detected=0`
+  - `shutdown_flatten_positions_start=1`
+  - `shutdown_flatten_positions_done=1`
+  - `shutdown_flatten_positions_failed=0`
+  - `shutdown_flatten_positions_residual=0`
+  - `shutdown_cancel_all_done=2`
+  - `shutdown_cancel_all_failed=0`
+  - `ticket_failed=0`
+  - `ticket_superseded=0`
+  - fills `0`
+- shutdown check:
+  - `spot_available=0.89504`
+  - `perp_position=0.0`
+  - `spot_notional=0.4597372959999999`
+  - `spot_flat_notional_threshold=1.0`
+  - `flat=true`
+- order response:
+  - `order_new=285`
+  - `order_cancel=285`
+  - `resp_code 00000=570`
+  - `resp_code 22002` は注文応答には出ていない。
+- pre_quote:
+  - rows `9070`
+  - final block: `side_edge_guard_block=5774`, `quote_fade=903`, `spot_hedge_sell_available_block=366`, `none=2027`
+  - `final_should_quote_bid`: true `2027`, false `7043`
+  - `final_should_quote_ask`: true `2393`, false `6677`
+  - `spot_hedge_sell_available_block=True` は `6140`
+  - `bid_side_edge_bps`: p10 `0.23274717731281136`, p50 `2.500222346717985`, p90 `4.887325097538424`
+  - `ask_side_edge_bps`: p10 `-5.161487387648146`, p50 `-2.6106790790411605`, p90 `-0.44717720220331536`
+- 終了後 read-only:
+  - `SPOT open orders=0`
+  - `Futures open orders=0`
+  - `Futures WLDUSDT position=0.0`
+  - `SPOT WLD available=0.89504`
+  - `SPOT WLD frozen=0.0`
+- bot.app process remaining なし。
+- `git diff -- config.yaml`: 差分なし。
+
+### 推論
+- safety 側は 60分でも合格。最小注文額未満 dust を flat 扱いする shutdown 修正は継続確認できた。
+- 収益化側は fills 0 のため未確定。
+- WLDUSDT wide22 + side-edge guard は、ask side の edge が弱く、bid side は `spot_hedge_sell_available_block` が大きい。dust のみ状態では片側機会を取り切れない。
+
+### 検証
+- `.venv\Scripts\python.exe scripts\analyze_live_profitability.py runtime_logs\live_symbol_WLDUSDT_wide22_side_edge_guard_60min_20260604_024521` で集計。
+- read-only で open orders 0 / futures position 0 / spot frozen 0 を確認。
+
+### 未確定点
+- side-edge guard 有効時の実 fill 継続収益性は未確認。
+- P2 は、注文せずに銘柄別の side-edge 通過率と quote 可能性を public/read-only で比較する。
+
+---
+
+## 2026-06-04 P2 public/read-only side-edge 銘柄scan追加
+
+### 観測事実
+- 注文・キャンセル・決済・live起動なしで、Bitget public ticker だけを読む scanner を追加。
+- 変更ファイル:
+  - `scripts\scan_side_edge_symbols.py`
+  - `tests\test_scan_side_edge_symbols.py`
+  - `STATUS.md`
+- scanner の計算式は strategy の `_quote_side_edge_fields` と同じ:
+  - bid side: `(spot_bid_hedge - perp_quote_bid) / mid_spot * 10000 - side_cost_bps`
+  - ask side: `(perp_quote_ask - spot_ask_hedge) / mid_spot * 10000 - side_cost_bps`
+- `BASE_HALF_SPREAD_BPS=22`, `MIN_HALF_SPREAD_BPS=22`, `SIDE_EDGE_MIN_BPS=0`, `--min-perp-quote-volume 10000000`, `--max-abs-mid-basis-bps 200` で public scan を実行。
+- 上位候補:
+  - `SKYAIUSDT`: best `29.1009bps`, ask pass, mid_basis `29.5474bps`
+  - `BCHUSDT`: best `17.1405bps`, bid pass, mid_basis `-17.5754bps`
+  - `MYXUSDT`: best `16.1917bps`, bid pass, mid_basis `-20.1207bps`
+  - `DOTUSDT`: best `15.0458bps`, bid pass, mid_basis `-17.9775bps`
+  - `INJUSDT`: best `14.3795bps`, bid pass, mid_basis `-15.8276bps`
+  - `FILUSDT`: best `13.8046bps`, bid pass, mid_basis `-17.5625bps`
+  - `MAGMAUSDT`: best `13.6696bps`, ask pass, mid_basis `12.7172bps`
+  - `RENDERUSDT`: best `13.1795bps`, bid pass, mid_basis `-13.9308bps`
+  - `ENAUSDT`: best `10.1630bps`, bid pass, mid_basis `-17.6471bps`
+  - `ONDOUSDT`: best `9.8687bps`, bid pass, mid_basis `-9.4731bps`
+- 主要候補:
+  - `SOLUSDT`: best `7.2678bps`, bid pass, ask fail
+  - `ETHUSDT`: best `7.1806bps`, bid pass, ask fail
+  - `XRPUSDT`: best `6.9248bps`, bid pass, ask fail
+  - `SUIUSDT`: best `5.8246bps`, bid pass, ask fail
+- 直近WLDUSDT 60分runと同じく、wide22条件では多くの銘柄が bid side 優位 / ask side 劣位。
+
+### 推論
+- 現状の `spot_available=dust` では bid quote 後の spot sell hedge が在庫不足で詰まりやすい。これは `spot_hedge_sell_available_block=True 6140` と整合。
+- 収益化の次候補は「ask side もpassする銘柄」か「spot在庫制約を明示管理したうえでbid sideも使う設計」。
+- `SKYAIUSDT` / `MAGMAUSDT` は ask side がpassするが、銘柄リスク・板厚・約定品質は未確認。
+- `SOL/ETH/XRP/SUI` は流動性は高いが、このsnapshotではask sideが弱く、spot在庫なし運用には不利。
+
+### 検証
+- `.venv\Scripts\python.exe -m py_compile scripts\scan_side_edge_symbols.py tests\test_scan_side_edge_symbols.py`: pass。
+- `.venv\Scripts\python.exe -m pytest -q tests\test_scan_side_edge_symbols.py`: `2 passed`。
+- public scan は REST read-only。注文系 endpoint は未使用。
+- `git diff -- config.yaml`: 差分なし。
+
+### 未確定点
+- scanner は ticker snapshot の近似。WS板・quote_fade・cancel aggressive・実fill品質は未評価。
+- ask-pass銘柄の実運用可否は dry bounded から確認が必要。
