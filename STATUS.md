@@ -3325,3 +3325,59 @@ ec1b00a  chore: bulk update after lint & format
 ### 未確定点
 - side-edge guard 有効時に実 fill が発生した場合の rough net は未確認。
 - 15分では fills 0 のため、収益性改善の判断は未完了。
+
+---
+
+## 2026-06-04 side-edge guard live bounded 30分と最小注文額未満 dust 判定修正
+
+### 観測事実
+- `SIDE_EDGE_GUARD=1` で WLDUSDT wide22 live bounded 30分を実行。
+- live 30分 log: `runtime_logs\live_symbol_WLDUSDT_wide22_side_edge_guard_30min_20260604_020454`
+  - `HALTED=0`
+  - `order_reject=0`
+  - `fill_parse_warning=0`
+  - `shutdown_flatten_positions_start=1`
+  - `shutdown_flatten_positions_done=0`
+  - `shutdown_flatten_positions_failed=1`
+  - `shutdown_flatten_positions_residual=1`
+  - fills `13`
+  - fill の `price / size / fee` は 0 なし。
+  - `side_edge_guard_block=6473`
+- rough QUOTE/HEDGE 突合:
+  - matched qty `245.35`
+  - gross `0.9371629999999852 USDT`
+  - known fees `0.14399728312280702 USDT`
+  - rough net `0.7931657168771782 USDT`
+  - sell quote side net `0.8313142868771896 USDT`
+  - buy quote side net `-0.0381485700000114 USDT`
+- 終了後 read-only:
+  - `SPOT open orders=0`
+  - `Futures open orders=0`
+  - `Futures WLDUSDT position=0.0`
+  - `SPOT WLD available=0.89504`
+  - `SPOT WLD frozen=0.0`
+- `scripts\flatten_account_state.py --execute` で spot sell `0.89504` を試行したが、Bitget が `45110 less than the minimum amount 1 USDT` を返した。
+- read-only は open orders 0 / futures position 0 のまま。
+
+### 推論
+- side-edge guard 有効時の 30分 run では、実 fill 後の rough net がプラスに転じた。
+- 残留 `0.89504 WLD` は notional 約 `0.466 USDT` で、Bitget spot 最小注文額 `1 USDT` 未満のため決済不能 dust。
+- shutdown residual 判定が `delta_tolerance_notional=0.2` のみを見ており、取引所の `min_notional` を考慮していなかった。
+
+### 実装
+- `bot/app.py`
+  - `_shutdown_position_snapshot` で spot constraints の `min_notional` を取得。
+  - spot notional の flat 判定閾値を `max(delta_tolerance_notional, spot.min_notional)` に変更。
+  - `spot_flat_notional_threshold` を shutdown check log に出力。
+- `tests/test_stop_bot_scripts.py`
+  - `spot_notional < spot.min_notional` の場合に shutdown snapshot が flat と判定するテストを追加。
+
+### 検証
+- `.venv\Scripts\python.exe -m py_compile bot\app.py tests\test_stop_bot_scripts.py`: pass。
+- `.venv\Scripts\python.exe -m pytest -q tests\test_stop_bot_scripts.py`: `6 passed`。
+- `.venv\Scripts\python.exe -m pytest -q`: `124 passed`。
+- `git diff -- config.yaml`: 差分なし。
+
+### 未確定点
+- 最小注文額未満 dust を flat 扱いする修正後の live shutdown check は未確認。
+- side-edge guard の rough net プラスは 30分1本の結果で、継続性は未確認。

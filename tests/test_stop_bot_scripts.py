@@ -1,6 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
+from types import SimpleNamespace
+
+from bot.app import _shutdown_position_snapshot
+from bot.exchange.constraints import InstrumentConstraints
+from bot.types import InstType
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -54,3 +60,62 @@ def test_app_supports_shutdown_flatten_positions() -> None:
     assert "shutdown_flatten_positions_start" in app
     assert "shutdown_flatten_positions_done" in app
     assert "shutdown_flatten_spot_bbo_unavailable" in app
+
+
+def test_shutdown_position_snapshot_treats_below_min_notional_spot_as_flat(monkeypatch) -> None:
+    from bot import app as app_module
+
+    class Logger:
+        def __init__(self) -> None:
+            self.records: list[dict] = []
+
+        def log(self, record: dict) -> None:
+            self.records.append(record)
+
+    class Constraints:
+        def get(self, inst_type: InstType):
+            if inst_type == InstType.SPOT:
+                return InstrumentConstraints(
+                    min_qty=0.01,
+                    qty_step=0.01,
+                    min_notional=1.0,
+                    tick_size=0.0001,
+                )
+            return None
+
+    class Gateway:
+        constraints = Constraints()
+
+        async def get_spot_available_balance(self, base_coin: str) -> float:
+            assert base_coin == "WLD"
+            return 0.89504
+
+        async def get_perp_position(self) -> float:
+            return 0.0
+
+    monkeypatch.setattr(
+        app_module,
+        "_spot_bbo_from_store",
+        lambda gateway, config: SimpleNamespace(bid=0.5212, ask=0.5214),
+    )
+    monkeypatch.setattr(
+        app_module.book_md,
+        "calc_mid",
+        lambda bbo: (bbo.bid + bbo.ask) / 2.0,
+    )
+    oms = SimpleNamespace(positions=SimpleNamespace(spot_pos=0.0, perp_pos=0.0))
+    config = SimpleNamespace(
+        symbols=SimpleNamespace(spot=SimpleNamespace(symbol="WLDUSDT")),
+        strategy=SimpleNamespace(delta_tolerance_notional=0.2),
+    )
+    logger = Logger()
+
+    snapshot = asyncio.run(
+        _shutdown_position_snapshot(oms, Gateway(), config, logger)
+    )
+
+    assert snapshot["spot_notional"] < 1.0
+    assert snapshot["spot_flat_notional_threshold"] == 1.0
+    assert snapshot["flat"] is True
+    assert oms.positions.spot_pos == 0.89504
+    assert oms.positions.perp_pos == 0.0

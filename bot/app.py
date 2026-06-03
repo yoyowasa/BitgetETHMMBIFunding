@@ -288,18 +288,32 @@ async def _shutdown_position_snapshot(oms, gateway, config, logger) -> dict:
     if spot_bbo is not None:
         mid_price = book_md.calc_mid(spot_bbo)
     spot_notional = None if spot_available is None or mid_price is None else abs(spot_available) * mid_price
+    spot_flat_notional_threshold = config.strategy.delta_tolerance_notional
+    constraints = getattr(gateway, "constraints", None)
+    spot_constraints = None
+    if constraints is not None:
+        getter = getattr(constraints, "get", None)
+        if callable(getter):
+            spot_constraints = getter(InstType.SPOT)
+        else:
+            spot_constraints = getattr(constraints, "spot", None)
+    if spot_constraints is not None:
+        min_notional = float(getattr(spot_constraints, "min_notional", 0.0) or 0.0)
+        if min_notional > 0:
+            spot_flat_notional_threshold = max(spot_flat_notional_threshold, min_notional)
     flat = (
         (perp_position is None or abs(perp_position) <= 1e-12)
         and (
             spot_available is None
             or spot_notional is None
-            or spot_notional <= config.strategy.delta_tolerance_notional
+            or spot_notional <= spot_flat_notional_threshold
         )
     )
     snapshot = {
         "spot_available": spot_available,
         "perp_position": perp_position,
         "spot_notional": spot_notional,
+        "spot_flat_notional_threshold": spot_flat_notional_threshold,
         "mid_price": mid_price,
         "flat": flat,
     }
