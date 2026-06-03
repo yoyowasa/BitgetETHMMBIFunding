@@ -3083,3 +3083,51 @@ ec1b00a  chore: bulk update after lint & format
 ### 未確定点
 - 実 fill 発生後に `shutdown_flatten_positions` が spot/perp 両脚を完全 flat に戻すかは次回 bounded で継続監視。
 - wide22 の収益性は今回 fills 0 のため評価不可。
+
+---
+
+## 2026-06-03 WLDUSDT wide22 live bounded 30分と 22002 stale store 修正
+
+### 観測事実
+- shutdown flatten 付き live bounded 30分を実行。
+- live 30分 log: `runtime_logs\live_symbol_WLDUSDT_wide22_shutdown_flatten_30min_20260603_230844`
+  - `HALTED=0`
+  - `fill_parse_warning=0`
+  - `shutdown_flatten_positions_start=1`
+  - `shutdown_flatten_positions_done=1`
+  - `shutdown_flatten_positions_failed=0`
+  - `shutdown_cancel_all_done=2`
+  - `shutdown_cancel_all_failed=0`
+  - fills `112`
+  - fill の `price / size / fee` は 0 なし。
+- 終了後 read-only:
+  - `SPOT open orders=0`
+  - `Futures open orders=0`
+  - `Futures WLDUSDT position=0.0`
+  - `SPOT WLD available=0.01339`
+  - `SPOT WLD frozen=0.0`
+- shutdown flatten 2回目で futures reduce-only close が `22002 No position to close` を返した。
+- 実口座 futures は flat だったが、stale な positions store が `perp_pos=-115` を返したため `order_reject=1` / `reject_streak=1` に積まれた。
+
+### 推論
+- fill 後の bounded shutdown flatten は最終 read-only 上 flat に戻せた。
+- `22002` は futures 側が既に flat の正常系だった。
+- reject 計上の原因は、`22002` 直後の確認が REST 実ポジションではなく stale な WS positions store に引き戻されたこと。
+
+### 実装
+- `bot/oms/oms.py`
+  - FLATTEN/UNWIND の futures reduce-only `22002` 直後は REST `get_perp_position()` を優先して同期。
+  - REST が `0` を返す場合は `reduce_only_no_position_sync_flat` として `reject_streak` を積まない。
+  - REST 同期結果を `rest_sync_used` でログ出力。
+- `tests/test_hedge_ticket_flatten_race.py`
+  - stale positions store が `-115`、REST が `0` を返す再現テストを追加。
+
+### 検証
+- `.venv\Scripts\python.exe -m py_compile bot\oms\oms.py`: pass。
+- `.venv\Scripts\python.exe -m pytest -q tests\test_hedge_ticket_flatten_race.py -q`: pass。
+- `.venv\Scripts\python.exe -m pytest -q`: `121 passed`。
+- `git diff -- config.yaml`: 差分なし。
+
+### 未確定点
+- 修正後に同じ shutdown 22002 が live bounded で再発した場合、`order_reject=0` になるかは次回 live bounded で確認する。
+- wide22 の収益性は net PnL がまだ弱く、継続評価が必要。

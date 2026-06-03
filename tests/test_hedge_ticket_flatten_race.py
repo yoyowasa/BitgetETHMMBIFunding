@@ -150,18 +150,23 @@ class OMSGateway:
         *,
         spot_available: float | None = None,
         position_rows: list[dict] | None = None,
+        rest_perp_position: float | None = None,
         place_order_response: dict | None = None,
     ) -> None:
         self.constraints = DummyConstraintsManager()
         self.orders: list[OrderRequest] = []
         self.cancels: list[dict] = []
         self.spot_available = spot_available
+        self.rest_perp_position = rest_perp_position
         self.store = SimpleNamespace(positions=SimpleNamespace(find=lambda: position_rows or []))
         self.place_order_response = place_order_response or {"code": "00000", "data": {"orderId": "order-1"}}
 
     async def get_spot_available_balance(self, base_coin: str) -> float | None:
         assert base_coin == "ETH"
         return self.spot_available
+
+    async def get_perp_position(self) -> float | None:
+        return self.rest_perp_position
 
     async def place_order(self, req: OrderRequest) -> dict:
         self.orders.append(req)
@@ -867,6 +872,64 @@ def test_reduce_only_22002_syncs_flat_without_reject_streak() -> None:
         for record in orders_logger.records
         if record.get("reason") == "reduce_only_no_position_sync_flat"
     ]
+
+
+def test_reduce_only_22002_uses_rest_when_position_store_is_stale() -> None:
+    gateway = OMSGateway(
+        position_rows=[{"symbol": "ETHUSDT", "total": "115", "holdSide": "short"}],
+        rest_perp_position=0.0,
+        place_order_response={"code": "22002", "msg": "No position to close"},
+    )
+    orders_logger = CapturingLogger()
+    risk = RiskGuards(_config().risk)
+    oms = OMS(
+        gateway,
+        _config(),
+        risk=risk,
+        orders_logger=orders_logger,
+        fills_logger=CapturingLogger(),
+    )
+    oms.positions.spot_pos = 114.88
+    oms.positions.perp_pos = -115.0
+    oms._positions_sync_authoritative = True
+
+    asyncio.run(
+        oms._submit_order(
+            OrderRequest(
+                inst_type=InstType.USDT_FUTURES,
+                symbol="ETHUSDT",
+                side=Side.BUY,
+                order_type=OrderType.MARKET,
+                size=115.0,
+                force=Force.IOC,
+                client_oid="FLATTEN-stale-store",
+                intent=OrderIntent.FLATTEN,
+                cycle_id=-2,
+                reduce_only=True,
+            ),
+            reason="shutdown_flatten_positions",
+        )
+    )
+
+    assert oms.positions.perp_pos == 0.0
+    assert risk.reject_streak == 0
+    assert [
+        record for record in orders_logger.records if record.get("reason") == "order_reject"
+    ] == []
+    rest_sync = [
+        record
+        for record in orders_logger.records
+        if record.get("reason") == "reduce_only_no_position_rest_sync"
+    ]
+    assert rest_sync
+    flat_logs = [
+        record
+        for record in orders_logger.records
+        if record.get("reason") == "reduce_only_no_position_sync_flat"
+    ]
+    assert flat_logs
+    assert flat_logs[-1]["rest_sync_used"] is True
+    assert flat_logs[-1]["action_taken"] == "skip_reject_streak"
 
 
 def test_post_only_quote_45001_does_not_increment_reject_streak() -> None:

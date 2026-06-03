@@ -1619,7 +1619,37 @@ class OMS:
                 "delta": self._positions.spot_pos + self._positions.perp_pos,
             }
         )
-        await self._sync_positions_once(timeout_sec=0.2)
+        rest_sync_used = False
+        rest_getter = getattr(self._gateway, "get_perp_position", None)
+        if not self._dry_run and callable(rest_getter):
+            try:
+                rest_perp_pos = await rest_getter()
+            except Exception as exc:
+                self._orders_logger.log(
+                    {
+                        "ts": time.time(),
+                        "event": "risk",
+                        "intent": req.intent.value,
+                        "source": "oms",
+                        "mode": "RUN",
+                        "reason": "reduce_only_no_position_rest_sync_failed",
+                        "leg": "perp",
+                        "cycle_id": req.cycle_id,
+                        "resp_code": resp_code,
+                        "response_msg": response.get("msg"),
+                        "exception": str(exc),
+                    }
+                )
+            else:
+                if rest_perp_pos is not None:
+                    rest_sync_used = True
+                    self._sync_positions_value(
+                        rest_perp_pos,
+                        reason="reduce_only_no_position_rest_sync",
+                        positions_empty=self._last_positions_empty,
+                    )
+        if not rest_sync_used:
+            await self._sync_positions_once(timeout_sec=0.2)
         flat = abs(self._positions.perp_pos) <= 1e-12
         if flat:
             self._unwind_pending_until = 0.0
@@ -1650,6 +1680,7 @@ class OMS:
                 "positions_sync_authoritative": self._positions_sync_authoritative,
                 "last_positions_sync_ts": self._last_positions_sync_ts,
                 "positions_empty": self._last_positions_empty,
+                "rest_sync_used": rest_sync_used,
                 "action_taken": "skip_reject_streak" if flat else "count_reject",
             }
         )
