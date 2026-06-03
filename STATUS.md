@@ -3131,3 +3131,49 @@ ec1b00a  chore: bulk update after lint & format
 ### 未確定点
 - 修正後に同じ shutdown 22002 が live bounded で再発した場合、`order_reject=0` になるかは次回 live bounded で確認する。
 - wide22 の収益性は net PnL がまだ弱く、継続評価が必要。
+
+---
+
+## 2026-06-03 22002 REST sync 修正後 live bounded 15分
+
+### 観測事実
+- commit `2b3a61e fix: use rest position sync for reduce-only 22002` push 後に live bounded 15分を実行。
+- 実行前 read-only:
+  - `SPOT open orders=0`
+  - `Futures open orders=0`
+  - `Futures WLDUSDT position=0.0`
+  - `SPOT WLD available=0.01339`
+  - `SPOT WLD frozen=0.0`
+- live 15分 log: `runtime_logs\live_symbol_WLDUSDT_wide22_after_22002_rest_sync_15min_20260603_234320`
+  - `HALTED=0`
+  - `order_reject=0`
+  - `fill_parse_warning=0`
+  - `resp_code 22002` は出たが `reduce_only_no_position_rest_sync=1` / `reduce_only_no_position_sync_flat=1`
+  - `reduce_only_no_position_sync_not_flat=0`
+  - `shutdown_flatten_positions_start=1`
+  - `shutdown_flatten_positions_done=1`
+  - `shutdown_flatten_positions_failed=0`
+  - `shutdown_cancel_all_done=2`
+  - `shutdown_cancel_all_failed=0`
+  - fills `9`
+  - fill の `price / size / fee` は 0 なし。
+- 終了後 read-only:
+  - `SPOT open orders=0`
+  - `Futures open orders=0`
+  - `Futures WLDUSDT position=0.0`
+  - `SPOT WLD available=0.89939`
+  - `SPOT WLD frozen=0.0`
+- bot.app process remaining なし。
+
+### 推論
+- stale positions store が残る shutdown 22002 でも、REST position sync により reject streak を積まないことを live で確認した。
+- bounded shutdown flatten は fill 後も futures flat / open orders 0 で終了できた。
+- `SPOT WLD available=0.89939` は最小発注単位未満の dust と判断する。
+
+### 検証
+- read-only で open orders 0 / futures position 0 / spot frozen 0 を確認。
+- ログ集計で `order_reject=0`、`reduce_only_no_position_sync_not_flat=0` を確認。
+
+### 未確定点
+- wide22 の収益性は、15分 run の last net PnL が `-0.000051964999999999995` でまだ優位性未確定。
+- PnL ログは fill ベースの手数料・スプレッド収益を十分反映していない可能性があり、収益判断は read-only 残高差分または約定再構成が必要。
