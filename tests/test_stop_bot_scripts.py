@@ -38,3 +38,19 @@ def test_run_real_logs_records_actual_bot_pid_metadata() -> None:
     assert "bot_mode" in script
     assert "$proc.Dispose()" in script
     assert "exit 0" in script
+
+
+def test_bounded_runner_enables_shutdown_flatten_by_default() -> None:
+    script = (ROOT / "scripts" / "run_bot_for_duration.py").read_text(encoding="utf-8")
+
+    assert 'env.setdefault("SHUTDOWN_FLATTEN_POSITIONS", "1")' in script
+    assert "env=env" in script
+
+
+def test_app_supports_shutdown_flatten_positions() -> None:
+    app = (ROOT / "bot" / "app.py").read_text(encoding="utf-8")
+
+    assert "SHUTDOWN_FLATTEN_POSITIONS" in app
+    assert "shutdown_flatten_positions_start" in app
+    assert "shutdown_flatten_positions_done" in app
+    assert "shutdown_flatten_spot_bbo_unavailable" in app

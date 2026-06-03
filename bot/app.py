@@ -256,6 +256,77 @@ async def _cancel_all_on_shutdown(oms, logger) -> bool:
     return True
 
 
+def _spot_bbo_from_store(gateway, config):
+    snapshot = book_md.snapshot_from_store(
+        gateway.store,
+        InstType.SPOT,
+        config.symbols.spot.symbol,
+        config.strategy.obi_levels,
+        gateway.public_book_channel,
+    )
+    if snapshot is None:
+        return None
+    return book_md.bbo_from_snapshot(snapshot)
+
+
+async def _flatten_positions_on_shutdown(oms, gateway, config, logger) -> bool:
+    if os.getenv("SHUTDOWN_FLATTEN_POSITIONS", "0") != "1":
+        return True
+    reason = "shutdown_flatten_positions"
+    logger.log(
+        {
+            "event": "shutdown_flatten_positions_start",
+            "intent": "SYSTEM",
+            "source": "shutdown",
+            "mode": "SHUTDOWN",
+            "reason": reason,
+            "leg": "positions",
+        }
+    )
+    try:
+        spot_bbo = _spot_bbo_from_store(gateway, config)
+        if spot_bbo is None:
+            logger.log(
+                {
+                    "event": "shutdown_flatten_positions_failed",
+                    "intent": "SYSTEM",
+                    "source": "shutdown",
+                    "mode": "SHUTDOWN",
+                    "reason": "shutdown_flatten_spot_bbo_unavailable",
+                    "leg": "positions",
+                }
+            )
+            return False
+        await oms.cancel_all(reason=reason)
+        await oms.flatten(spot_bbo, cycle_id=-1, reason=reason)
+        await asyncio.sleep(float(os.getenv("SHUTDOWN_FLATTEN_WAIT_SEC", "3")))
+        await oms.flatten(spot_bbo, cycle_id=-2, reason=reason)
+        logger.log(
+            {
+                "event": "shutdown_flatten_positions_done",
+                "intent": "SYSTEM",
+                "source": "shutdown",
+                "mode": "SHUTDOWN",
+                "reason": reason,
+                "leg": "positions",
+            }
+        )
+        return True
+    except Exception as exc:
+        logger.log(
+            {
+                "event": "shutdown_flatten_positions_failed",
+                "intent": "SYSTEM",
+                "source": "shutdown",
+                "mode": "SHUTDOWN",
+                "reason": reason,
+                "leg": "positions",
+                "error": repr(exc),
+            }
+        )
+        return False
+
+
 def _install_shutdown_signal_handlers(logger, shutdown_event: asyncio.Event) -> list[tuple[int, object]]:
     # 役割: bounded runner の CTRL_BREAK/SIGINT を asyncio 側の graceful shutdown に変換する
     loop = asyncio.get_running_loop()
@@ -706,6 +777,12 @@ async def _run() -> None:
                     task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             if private_enabled:
+                if not config.strategy.dry_run:
+                    ok = await _flatten_positions_on_shutdown(
+                        oms, gateway, config, system_logger
+                    )
+                    if not ok:
+                        raise SystemExit(1)
                 ok = await _cancel_all_on_shutdown(oms, system_logger)
                 if not ok:
                     raise SystemExit(1)

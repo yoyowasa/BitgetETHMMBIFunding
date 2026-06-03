@@ -101,6 +101,8 @@ def main() -> int:
         f"[run_bot_for_duration] start duration_sec={args.duration_sec} cmd={' '.join(cmd)}",
         flush=True,
     )
+    env = os.environ.copy()
+    env.setdefault("SHUTDOWN_FLATTEN_POSITIONS", "1")
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -108,6 +110,7 @@ def main() -> int:
         text=True,
         bufsize=1,
         creationflags=_creationflags(),
+        env=env,
     )
     out_thread = threading.Thread(target=_pump_output, args=(proc,), daemon=True)
     out_thread.start()

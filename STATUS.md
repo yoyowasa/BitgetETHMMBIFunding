@@ -2968,3 +2968,73 @@ ec1b00a  chore: bulk update after lint & format
 ### 未確定点
 - wide22 live bounded 15分で実 fill が発生するかは未確認。
 - `ticket_superseded` が live fill path で想定通り出るかは未確認。
+
+---
+
+## 2026-06-03 WLDUSDT wide22 live bounded 15分と shutdown flatten 修正
+
+### 観測事実
+- commit `6b43578 chore: add read-only account state check` push 後に live bounded 15分を実行。
+- 実行 env:
+  - `SYMBOL=WLDUSDT`
+  - `BASE_HALF_SPREAD_BPS=22`
+  - `MIN_HALF_SPREAD_BPS=22`
+  - `DRY_RUN=0`
+  - `REAL_RUN_OK=1`
+- live 15分 log: `runtime_logs\live_symbol_WLDUSDT_wide22_after_superseded_15min_20260603_130039`
+  - `HALTED=0`
+  - `order_reject=0`
+  - `fill_parse_warning=0`
+  - `resp_code 22002=0`
+  - `shutdown_cancel_all_done=2`
+  - `shutdown_cancel_all_failed=0`
+  - `ticket_failed=0`
+  - `ticket_superseded=2`
+  - fills `18`
+  - fill の `price / size / fee` は 0 なし。
+- 終了後 read-only:
+  - `SPOT open orders=0`
+  - `Futures open orders=0`
+  - `Futures WLDUSDT position=-6.0`
+  - `SPOT WLD available=7.58354`
+  - `SPOT WLD frozen=0.0`
+- 残留解消:
+  - `scripts\flatten_account_state.py --execute` を `FLATTEN_ACCOUNT_OK=1` 付きで実行。
+  - futures `buy 6 reduce_only market`
+  - spot `sell 7.58354 limit_ioc`
+  - 実行後 read-only:
+    - `SPOT open orders=0`
+    - `Futures open orders=0`
+    - `Futures WLDUSDT position=0.0`
+    - `SPOT WLD available=0.00354`
+    - `SPOT WLD frozen=0.0`
+
+### 推論
+- live 15分中の HEDGE / FLATTEN 実約定 path は安全側に処理された。
+- `ticket_superseded=2` は想定どおり `ticket_failed` から分離された。
+- 終了後残留は、`spot + perp ≒ 0` のヘッジ在庫を通常戦略が許容し、shutdown が cancel only だったため。
+- 常駐ではヘッジ在庫は戦略上あり得るが、bounded validation の終了条件は flat なので shutdown flatten が必要。
+
+### 実装
+- `scripts/flatten_account_state.py`
+  - plan-only が既定。
+  - 実注文には `--execute` と `FLATTEN_ACCOUNT_OK=1` を必須化。
+  - futures reduce-only market と spot limit IOC で現在状態を flatten。
+- `bot/app.py`
+  - `SHUTDOWN_FLATTEN_POSITIONS=1` の時だけ shutdown 時に position flatten を実行。
+  - `shutdown_flatten_positions_start/done/failed` を system log に出力。
+- `scripts/run_bot_for_duration.py`
+  - bounded runner の子プロセス env に `SHUTDOWN_FLATTEN_POSITIONS=1` を既定付与。
+  - ユーザーが明示設定済みなら上書きしない。
+- `tests/test_stop_bot_scripts.py`
+  - bounded runner の shutdown flatten env と app log 経路を固定。
+
+### 検証
+- `.venv\Scripts\python.exe -m py_compile bot\app.py scripts\run_bot_for_duration.py scripts\flatten_account_state.py scripts\check_readonly_account_state.py`: pass。
+- `.venv\Scripts\python.exe -m pytest -q tests\test_stop_bot_scripts.py tests\test_config_apis.py tests\test_hedge_ladder.py tests\test_hedge_ticket_flatten_race.py`: `33 passed`。
+- `.venv\Scripts\python.exe -m pytest -q`: `120 passed`。
+- `git diff -- config.yaml`: 差分なし。
+
+### 未確定点
+- shutdown flatten 追加後の live bounded 再確認は未実施。
+- wide22 は fill 後も net PnL が改善したか、次回 shutdown flatten 付き live bounded 15分で再評価する。
