@@ -3381,3 +3381,49 @@ ec1b00a  chore: bulk update after lint & format
 ### 未確定点
 - 最小注文額未満 dust を flat 扱いする修正後の live shutdown check は未確認。
 - side-edge guard の rough net プラスは 30分1本の結果で、継続性は未確認。
+
+---
+
+## 2026-06-04 最小注文額未満 dust flat 判定 live bounded 5分確認
+
+### 観測事実
+- commit `5df4b7b fix: treat below-minimum spot dust as flat on shutdown` push 後に `SIDE_EDGE_GUARD=1` で live bounded 5分を実行。
+- live 5分 log: `runtime_logs\live_symbol_WLDUSDT_wide22_dust_flat_threshold_5min_20260604_023908`
+  - `HALTED=0`
+  - `order_reject=0`
+  - `fill_parse_warning=0`
+  - `startup_open_spot_balance_detected=0`
+  - `shutdown_flatten_positions_start=1`
+  - `shutdown_flatten_positions_check=4`
+  - `shutdown_flatten_positions_done=1`
+  - `shutdown_flatten_positions_failed=0`
+  - `shutdown_flatten_positions_residual=0`
+  - `shutdown_cancel_all_done=2`
+  - `shutdown_cancel_all_failed=0`
+  - fills `0`
+- shutdown check:
+  - `spot_available=0.89504`
+  - `perp_position=0.0`
+  - `spot_notional=0.46747939199999994`
+  - `spot_flat_notional_threshold=1.0`
+  - `flat=true`
+- 終了後 read-only:
+  - `SPOT open orders=0`
+  - `Futures open orders=0`
+  - `Futures WLDUSDT position=0.0`
+  - `SPOT WLD available=0.89504`
+  - `SPOT WLD frozen=0.0`
+- bot.app process remaining なし。
+
+### 推論
+- Bitget spot 最小注文額未満 dust を shutdown failure 扱いしない修正は live で確認できた。
+- `0.89504 WLD` は売却不能 dust として残るが、open orders / futures position は 0。
+
+### 検証
+- read-only で open orders 0 / futures position 0 / spot frozen 0 を確認。
+- ログで `shutdown_flatten_positions_done=1` / failed 0 / residual 0 を確認。
+- `git diff -- config.yaml`: 差分なし。
+
+### 未確定点
+- side-edge guard の rough net プラス継続性は未確認。
+- 次は 60分 bounded で rough net と shutdown flat を再評価する。
