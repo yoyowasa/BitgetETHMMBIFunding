@@ -3536,3 +3536,51 @@ ec1b00a  chore: bulk update after lint & format
 ### 未確定点
 - scanner は ticker snapshot の近似。WS板・quote_fade・cancel aggressive・実fill品質は未評価。
 - ask-pass銘柄の実運用可否は dry bounded から確認が必要。
+
+---
+
+## 2026-06-04 SKYAIUSDT ask-pass 候補 dry bounded 15分確認
+
+### 観測事実
+- commit `57a3e13 feat: add read-only side edge symbol scanner` push 後、`SKYAIUSDT` を DRY bounded 15分で確認。
+- dry 15分 log: `runtime_logs\dry_symbol_SKYAIUSDT_wide22_side_edge_guard_15min_20260604_035441`
+- 実行条件:
+  - `DRY_RUN=1`
+  - `BOT_MODE=dry`
+  - `SYMBOL=SKYAIUSDT`
+  - `BASE_HALF_SPREAD_BPS=22`
+  - `MIN_HALF_SPREAD_BPS=22`
+  - `SIDE_EDGE_GUARD=1`
+  - `SIDE_EDGE_MIN_BPS=0`
+- 集計:
+  - `HALTED=0`
+  - `fill_count=0`
+  - `order_new=535`
+  - `order_cancel=535`
+  - dry のため `order_resp_codes=None`
+  - `shutdown_cancel_all_done=1`
+  - `book_rx_rate=14`
+  - `fill_monitor_heartbeat=15`
+  - `positions_monitor_heartbeat=15`
+  - `runtime_heartbeat=14`
+- pre_quote:
+  - rows `1885`
+  - final block: `spot_hedge_sell_available_block=1258`, `quote_fade=502`, `none=125`
+  - order intents: `QUOTE_ASK=1070`
+  - `bid_side_edge_bps`: p10 `-30.151642662635055`, p50 `-27.14977467359183`, p90 `-23.911185336953977`
+  - `ask_side_edge_bps`: p10 `23.787448449992958`, p50 `27.52941066127228`, p90 `30.525691665208143`
+  - `final_should_quote_bid`: true `125`, false `1760`
+  - `final_should_quote_ask`: true `1383`, false `502`
+- `git diff -- config.yaml`: 差分なし。
+
+### 推論
+- scanner で ask-pass と出た `SKYAIUSDT` は、DRY実行中のWS/strategyログでも ask side edge が強く、方向性は一致した。
+- ただし fills 0 のため、実約定品質と収益性は未確定。
+- `spot_hedge_sell_available_block` は引き続き大きいが、実際の注文意図は `QUOTE_ASK` に偏っており、spot在庫dust運用でもWLDより検証価値がある。
+
+### 検証
+- `.venv\Scripts\python.exe scripts\analyze_live_profitability.py runtime_logs\dry_symbol_SKYAIUSDT_wide22_side_edge_guard_15min_20260604_035441` で集計。
+- 追加の手動集計で side-edge 分布、heartbeat、intent を確認。
+
+### 未確定点
+- DRY 15分では fills 0。次は `SKYAIUSDT` の dry 60分または少額live boundedの前に、板厚/最小注文/制約を確認する。
