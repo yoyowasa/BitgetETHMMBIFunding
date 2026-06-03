@@ -3177,3 +3177,47 @@ ec1b00a  chore: bulk update after lint & format
 ### 未確定点
 - wide22 の収益性は、15分 run の last net PnL が `-0.000051964999999999995` でまだ優位性未確定。
 - PnL ログは fill ベースの手数料・スプレッド収益を十分反映していない可能性があり、収益判断は read-only 残高差分または約定再構成が必要。
+
+---
+
+## 2026-06-03 side-edge guard 実装
+
+### 観測事実
+- WLDUSDT wide22 live fill を QUOTE/HEDGE で概算突合。
+- `runtime_logs\live_symbol_WLDUSDT_wide22_shutdown_flatten_30min_20260603_230844`
+  - matched quote/hedge qty `1774.15`
+  - gross `-0.973455 USDT`
+  - known fees `1.0984679834 USDT`
+  - rough net `-2.0719229834 USDT`
+- `runtime_logs\live_symbol_WLDUSDT_wide22_after_22002_rest_sync_15min_20260603_234320`
+  - matched quote/hedge qty `227.0`
+  - gross `-0.05707699999999394 USDT`
+  - known fees `0.153128942 USDT`
+  - rough net `-0.21020594199999393 USDT`
+
+### 推論
+- wide22 は安全性は改善したが、spot hedge 実行価格を含む片側 edge が負で、約定ごとに損失になっている。
+- 既存の total edge 判定は futures quote spread と概算コストだけを見ており、`perp quote price` と `spot hedge executable price` の basis/IOC cost を片側ごとに見ていない。
+
+### 実装
+- `bot/config.py`
+  - `StrategyConfig.side_edge_guard_enabled` / `side_edge_min_bps` を追加。
+  - env `SIDE_EDGE_GUARD` / `SIDE_EDGE_MIN_BPS` で上書き可能にした。
+- `bot/strategy/mm_funding.py`
+  - bid quote は `spot bid` で売り hedge した場合の edge を計算。
+  - ask quote は `spot ask` で買い hedge した場合の edge を計算。
+  - `fee_maker_perp_bps + fee_taker_spot_bps + slippage_bps + adverse_buffer_bps` を片側 cost として控除。
+  - guard 有効時に side edge が閾値未満なら、その片側 quote の size を `0` にして `side_edge_guard_block` を出す。
+- `tests/test_total_edge.py`
+  - 負の spot hedge edge を bid/ask とも block するケースを追加。
+  - favorable ask のみ通すケースを追加。
+
+### 検証
+- `.venv\Scripts\python.exe -m py_compile bot\config.py bot\strategy\mm_funding.py`: pass。
+- `.venv\Scripts\python.exe -m pytest -q tests\test_total_edge.py`: `3 passed`。
+- `.venv\Scripts\python.exe -m pytest -q`: `123 passed`。
+- `git diff -- config.yaml`: 差分なし。
+
+### 未確定点
+- `SIDE_EDGE_GUARD=1` の live bounded で fill 数と rough net が改善するかは未確認。
+- guard が厳しすぎて約定ゼロになる可能性があるため、まず 15分 bounded で通過率と block 率を見る。

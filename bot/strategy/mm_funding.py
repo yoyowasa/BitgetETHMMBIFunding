@@ -1039,9 +1039,45 @@ class MMFundingStrategy:
                 spread_bps,
             )
 
+        side_edge_fields = self._quote_side_edge_fields(
+            bid_px=bid_px,
+            ask_px=ask_px,
+            spot_bbo=spot_bbo,
+            mid_spot=mid_spot,
+        )
+        side_edge_block_bid = False
+        side_edge_block_ask = False
+        if self._config.strategy.side_edge_guard_enabled:
+            min_side_edge_bps = self._config.strategy.side_edge_min_bps
+            bid_edge = side_edge_fields["bid_side_edge_bps"]
+            ask_edge = side_edge_fields["ask_side_edge_bps"]
+            if bid_edge is not None and bid_edge < min_side_edge_bps:
+                size_bid = 0.0
+                side_edge_block_bid = True
+                self._log_side_edge_guard_block(
+                    now,
+                    leg="bid",
+                    side_edge_bps=bid_edge,
+                    min_side_edge_bps=min_side_edge_bps,
+                    fields=side_edge_fields,
+                )
+            if ask_edge is not None and ask_edge < min_side_edge_bps:
+                size_ask = 0.0
+                side_edge_block_ask = True
+                self._log_side_edge_guard_block(
+                    now,
+                    leg="ask",
+                    side_edge_bps=ask_edge,
+                    min_side_edge_bps=min_side_edge_bps,
+                    fields=side_edge_fields,
+                )
+
         self._log_pre_quote_decision(
             now,
             final_block_reason=(
+                "side_edge_guard_block"
+                if size_bid <= 0 and size_ask <= 0 and (side_edge_block_bid or side_edge_block_ask)
+                else
                 "one_sided_quote_suppressed"
                 if size_bid <= 0 and size_ask <= 0
                 else "spot_hedge_sell_available_block"
@@ -1064,6 +1100,10 @@ class MMFundingStrategy:
             one_sided_suppressed_ask=suppress_ask,
             final_should_quote_bid=size_bid > 0,
             final_should_quote_ask=size_ask > 0,
+            side_edge_fields=side_edge_fields,
+            side_edge_guard_enabled=self._config.strategy.side_edge_guard_enabled,
+            side_edge_block_bid=side_edge_block_bid,
+            side_edge_block_ask=side_edge_block_ask,
             spot_hedge_sell_available=spot_hedge_sell_available,
             spot_hedge_sell_required=spot_hedge_sell_required,
             spot_hedge_sell_adjusted=spot_hedge_sell_adjusted,
@@ -1291,6 +1331,73 @@ class MMFundingStrategy:
             return abs(tfi) >= 0.8, 0.8
         return True, self._config.strategy.tfi_fade_threshold
 
+    def _quote_side_edge_fields(
+        self,
+        *,
+        bid_px: float,
+        ask_px: float,
+        spot_bbo: book_md.BBO,
+        mid_spot: float,
+    ) -> dict[str, float | None]:
+        if mid_spot <= 0:
+            return {
+                "bid_side_edge_bps": None,
+                "ask_side_edge_bps": None,
+                "bid_spot_hedge_px": None,
+                "ask_spot_hedge_px": None,
+                "side_cost_bps": None,
+            }
+        hedge_bps = (
+            self._config.hedge.hedge_aggressive_bps
+            if self._config.hedge.use_spot_limit_ioc
+            else 0.0
+        )
+        bid_spot_hedge_px = spot_bbo.bid * (1 - hedge_bps / 10000.0)
+        ask_spot_hedge_px = spot_bbo.ask * (1 + hedge_bps / 10000.0)
+        side_cost_bps = (
+            self._config.cost.fee_maker_perp_bps
+            + self._config.cost.fee_taker_spot_bps
+            + self._config.cost.slippage_bps
+            + self._config.strategy.adverse_buffer_bps
+        )
+        return {
+            "bid_side_edge_bps": (
+                (bid_spot_hedge_px - bid_px) / mid_spot * 10000.0 - side_cost_bps
+            ),
+            "ask_side_edge_bps": (
+                (ask_px - ask_spot_hedge_px) / mid_spot * 10000.0 - side_cost_bps
+            ),
+            "bid_spot_hedge_px": bid_spot_hedge_px,
+            "ask_spot_hedge_px": ask_spot_hedge_px,
+            "side_cost_bps": side_cost_bps,
+        }
+
+    def _log_side_edge_guard_block(
+        self,
+        ts: float,
+        *,
+        leg: str,
+        side_edge_bps: float,
+        min_side_edge_bps: float,
+        fields: dict[str, float | None],
+    ) -> None:
+        self._decision_logger.log(
+            {
+                "ts": ts,
+                "event": "risk",
+                "intent": "quote",
+                "source": "strategy",
+                "mode": self._state.value,
+                "reason": "side_edge_guard_block",
+                "leg": leg,
+                "cycle_id": self._cycle_id,
+                "side_edge_bps": side_edge_bps,
+                "min_side_edge_bps": min_side_edge_bps,
+                **fields,
+                "action": f"suppress_{leg}_quote",
+            }
+        )
+
     def _log_pre_quote_decision(
         self,
         ts: float,
@@ -1308,6 +1415,10 @@ class MMFundingStrategy:
         final_should_quote_ask: bool,
         cancel_aggressive_scope_suppressed: bool = False,
         cancel_aggressive_quality_suppressed: bool = False,
+        side_edge_fields: dict[str, float | None] | None = None,
+        side_edge_guard_enabled: bool = False,
+        side_edge_block_bid: bool = False,
+        side_edge_block_ask: bool = False,
         spot_hedge_sell_available: float | None = None,
         spot_hedge_sell_required: float | None = None,
         spot_hedge_sell_adjusted: float | None = None,
@@ -1356,6 +1467,18 @@ class MMFundingStrategy:
                 "tfi_fade_triggered": tfi_fade_triggered,
                 "one_sided_suppressed_bid": one_sided_suppressed_bid,
                 "one_sided_suppressed_ask": one_sided_suppressed_ask,
+                "side_edge_guard_enabled": side_edge_guard_enabled,
+                "side_edge_block_bid": side_edge_block_bid,
+                "side_edge_block_ask": side_edge_block_ask,
+                "bid_side_edge_bps": None
+                if side_edge_fields is None
+                else side_edge_fields.get("bid_side_edge_bps"),
+                "ask_side_edge_bps": None
+                if side_edge_fields is None
+                else side_edge_fields.get("ask_side_edge_bps"),
+                "side_cost_bps": None
+                if side_edge_fields is None
+                else side_edge_fields.get("side_cost_bps"),
                 "spot_hedge_sell_available": spot_hedge_sell_available,
                 "spot_hedge_sell_required": spot_hedge_sell_required,
                 "spot_hedge_sell_adjusted": spot_hedge_sell_adjusted,

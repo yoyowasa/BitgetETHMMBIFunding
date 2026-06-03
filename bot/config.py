@@ -67,6 +67,8 @@ class StrategyConfig:
     cancel_aggressive_max_trade_age_ms: float = 500.0
     cancel_aggressive_active_proximity_bps: float = 1.0
     one_sided_quote_policy: str = "current"
+    side_edge_guard_enabled: bool = False
+    side_edge_min_bps: float = 0.0
     tfi_fade_threshold: float = 0.6
     tfi_fade_policy: str = "current"
     reprice_threshold_bps: float = 1.0
@@ -170,6 +172,12 @@ def load_apis(exchange: ExchangeConfig) -> dict:
 
 
 def apply_env_overrides(config: AppConfig) -> None:
+    def _env_bool(name: str) -> bool | None:
+        raw = os.getenv(name)
+        if raw is None or raw == "":
+            return None
+        return raw.strip().lower() in {"1", "true", "yes", "on"}
+
     def _env_float(name: str) -> float | None:
         raw = os.getenv(name)
         if raw is None or raw == "":
@@ -222,3 +230,11 @@ def apply_env_overrides(config: AppConfig) -> None:
     hedge_deadline_sec = _env_float("HEDGE_DEADLINE_SEC")
     if hedge_deadline_sec is not None:
         config.hedge.hedge_deadline_sec = hedge_deadline_sec
+
+    side_edge_guard = _env_bool("SIDE_EDGE_GUARD")
+    if side_edge_guard is not None:
+        config.strategy.side_edge_guard_enabled = side_edge_guard
+
+    side_edge_min_bps = _env_float("SIDE_EDGE_MIN_BPS")
+    if side_edge_min_bps is not None:
+        config.strategy.side_edge_min_bps = side_edge_min_bps

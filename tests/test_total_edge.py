@@ -89,6 +89,15 @@ def _config() -> AppConfig:
     )
 
 
+def _config_with_side_edge_guard() -> AppConfig:
+    config = _config()
+    config.strategy.base_half_spread_bps = 22.0
+    config.strategy.min_half_spread_bps = 22.0
+    config.strategy.side_edge_guard_enabled = True
+    config.strategy.side_edge_min_bps = 0.0
+    return config
+
+
 def _snapshot_from_store(store, inst_type: InstType, symbol: str, levels: int, channel=None, return_meta=False):
     snapshot = SimpleNamespace(
         bids=[(100.0, 1.0)],
@@ -123,3 +132,76 @@ def test_total_edge_negative_logs(monkeypatch) -> None:
     assert risk_log["expected_spread_bps"] == 16.0
     assert risk_log["cost_bps"] == 28.0
     assert risk_log["funding_bps"] > 0
+
+
+def test_side_edge_guard_blocks_negative_spot_hedge_edge(monkeypatch) -> None:
+    from bot.strategy import mm_funding as module
+
+    def snapshot_from_store(store, inst_type: InstType, symbol: str, levels: int, channel=None, return_meta=False):
+        snapshot = SimpleNamespace(inst_type=inst_type, ts=time.time())
+        return (snapshot, True) if return_meta else snapshot
+
+    def bbo_from_snapshot(snapshot):
+        return SimpleNamespace(
+            bid=100.0,
+            ask=100.2,
+            bid_size=1.0,
+            ask_size=1.0,
+            ts=snapshot.ts,
+        )
+
+    monkeypatch.setattr(module.book_md, "snapshot_from_store", snapshot_from_store)
+    monkeypatch.setattr(module.book_md, "bbo_from_snapshot", bbo_from_snapshot)
+    monkeypatch.setattr(module.book_md, "calc_mid", lambda bbo: (bbo.bid + bbo.ask) / 2.0)
+    monkeypatch.setattr(module.book_md, "calc_microprice", lambda bbo: (bbo.ask * bbo.bid_size + bbo.bid * bbo.ask_size) / (bbo.bid_size + bbo.ask_size))
+    monkeypatch.setattr(module.book_md, "calc_obi", lambda snapshot: 0.0)
+
+    funding_cache = SimpleNamespace(last=FundingInfo(funding_rate=0.0001, next_update_time=None, interval_sec=None, ts=time.time()))
+    oms = DummyOMS()
+    logger = DummyLogger()
+    strategy = MMFundingStrategy(_config_with_side_edge_guard(), funding_cache, oms, DummyRisk(), logger)
+
+    import asyncio
+    asyncio.run(strategy.step())
+
+    assert oms.last_update_quotes is not None
+    assert oms.last_update_quotes["bid_size"] == 0.0
+    assert oms.last_update_quotes["ask_size"] == 0.0
+    logs = [record for record in logger.records if record.get("reason") == "side_edge_guard_block"]
+    assert {record["leg"] for record in logs} == {"bid", "ask"}
+    pre_quote = [record for record in logger.records if record.get("reason") == "pre_quote_decision"][-1]
+    assert pre_quote["final_block_reason"] == "side_edge_guard_block"
+    assert pre_quote["side_edge_guard_enabled"] is True
+
+
+def test_side_edge_guard_allows_favorable_ask(monkeypatch) -> None:
+    from bot.strategy import mm_funding as module
+
+    def snapshot_from_store(store, inst_type: InstType, symbol: str, levels: int, channel=None, return_meta=False):
+        snapshot = SimpleNamespace(inst_type=inst_type, ts=time.time())
+        return (snapshot, True) if return_meta else snapshot
+
+    def bbo_from_snapshot(snapshot):
+        if snapshot.inst_type == InstType.SPOT:
+            return SimpleNamespace(bid=98.8, ask=99.0, bid_size=1.0, ask_size=1.0, ts=snapshot.ts)
+        return SimpleNamespace(bid=100.0, ask=100.2, bid_size=1.0, ask_size=1.0, ts=snapshot.ts)
+
+    monkeypatch.setattr(module.book_md, "snapshot_from_store", snapshot_from_store)
+    monkeypatch.setattr(module.book_md, "bbo_from_snapshot", bbo_from_snapshot)
+    monkeypatch.setattr(module.book_md, "calc_mid", lambda bbo: (bbo.bid + bbo.ask) / 2.0)
+    monkeypatch.setattr(module.book_md, "calc_microprice", lambda bbo: (bbo.ask * bbo.bid_size + bbo.bid * bbo.ask_size) / (bbo.bid_size + bbo.ask_size))
+    monkeypatch.setattr(module.book_md, "calc_obi", lambda snapshot: 0.0)
+
+    funding_cache = SimpleNamespace(last=FundingInfo(funding_rate=0.0001, next_update_time=None, interval_sec=None, ts=time.time()))
+    oms = DummyOMS()
+    logger = DummyLogger()
+    strategy = MMFundingStrategy(_config_with_side_edge_guard(), funding_cache, oms, DummyRisk(), logger)
+
+    import asyncio
+    asyncio.run(strategy.step())
+
+    assert oms.last_update_quotes is not None
+    assert oms.last_update_quotes["ask_size"] > 0.0
+    pre_quote = [record for record in logger.records if record.get("reason") == "pre_quote_decision"][-1]
+    assert pre_quote["ask_side_edge_bps"] >= 0.0
+    assert pre_quote["final_should_quote_ask"] is True
