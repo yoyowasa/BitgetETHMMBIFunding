@@ -411,7 +411,7 @@ class OMS:
                 await self._sync_positions_once(timeout_sec=0.2)
                 if self._should_skip_open_delta_flatten(spot_bbo, cycle_id, reason):
                     return
-            self.fail_open_tickets("flatten_started")
+            self.supersede_open_tickets("flatten_started")
             await self._cancel_all_quotes_unlocked(reason=reason)
             if not self._gateway.constraints.ready():
                 return
@@ -803,6 +803,15 @@ class OMS:
                 continue
             ticket.status = "FAILED"
             self._log_ticket_failed(ticket, reason)
+            self._cleanup_ticket(ticket_id)
+
+    def supersede_open_tickets(self, reason: str) -> None:
+        for ticket_id, ticket in list(self._hedge_tickets.items()):
+            if ticket.status != "OPEN":
+                self._cleanup_ticket(ticket_id)
+                continue
+            ticket.status = "SUPERSEDED"
+            self._log_ticket_superseded(ticket, reason)
             self._cleanup_ticket(ticket_id)
 
     async def _handle_fill(
@@ -1208,6 +1217,25 @@ class OMS:
                 "remain": ticket.remain,
                 "tries": ticket.tries,
                 "fail_reason": reason,
+            }
+        )
+
+    def _log_ticket_superseded(self, ticket: HedgeTicket, reason: str) -> None:
+        self._orders_logger.log(
+            {
+                "event": "state",
+                "intent": OrderIntent.HEDGE.value,
+                "source": "oms",
+                "mode": "HEDGING",
+                "reason": "ticket_superseded",
+                "leg": "spot_ioc",
+                "cycle_id": None,
+                "ticket_id": ticket.ticket_id,
+                "want_qty": ticket.want_qty,
+                "filled_qty": ticket.filled_qty,
+                "remain": ticket.remain,
+                "tries": ticket.tries,
+                "supersede_reason": reason,
             }
         )
 

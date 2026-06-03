@@ -170,6 +170,18 @@ def load_apis(exchange: ExchangeConfig) -> dict:
 
 
 def apply_env_overrides(config: AppConfig) -> None:
+    def _env_float(name: str) -> float | None:
+        raw = os.getenv(name)
+        if raw is None or raw == "":
+            return None
+        return float(raw)
+
+    def _env_int(name: str) -> int | None:
+        raw = os.getenv(name)
+        if raw is None or raw == "":
+            return None
+        return int(raw)
+
     symbol = os.getenv("SYMBOL")
     if symbol:
         config.symbols.spot.symbol = symbol
@@ -186,3 +198,27 @@ def apply_env_overrides(config: AppConfig) -> None:
     margin_coin = os.getenv("MARGIN_COIN")
     if margin_coin:
         config.symbols.perp.marginCoin = margin_coin
+
+    target_notional = _env_float("TARGET_NOTIONAL")
+    if target_notional is not None:
+        config.strategy.target_notional = target_notional
+
+    base_half_spread_bps = _env_float("BASE_HALF_SPREAD_BPS")
+    if base_half_spread_bps is not None:
+        config.strategy.base_half_spread_bps = base_half_spread_bps
+
+    min_half_spread_bps = _env_float("MIN_HALF_SPREAD_BPS")
+    if min_half_spread_bps is not None:
+        config.strategy.min_half_spread_bps = min_half_spread_bps
+
+    quote_refresh_ms = _env_int("QUOTE_REFRESH_MS")
+    if quote_refresh_ms is not None:
+        config.strategy.quote_refresh_ms = quote_refresh_ms
+
+    hedge_aggressive_bps = _env_float("HEDGE_AGGRESSIVE_BPS")
+    if hedge_aggressive_bps is not None:
+        config.hedge.hedge_aggressive_bps = hedge_aggressive_bps
+
+    hedge_deadline_sec = _env_float("HEDGE_DEADLINE_SEC")
+    if hedge_deadline_sec is not None:
+        config.hedge.hedge_deadline_sec = hedge_deadline_sec

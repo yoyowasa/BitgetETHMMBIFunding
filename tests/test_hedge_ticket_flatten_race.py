@@ -397,7 +397,7 @@ def test_unhedged_exceeded_defers_flatten_while_unwind_pending(monkeypatch) -> N
     assert risks[-1]["action_taken"] == "defer_flatten_cancel_quotes"
 
 
-def test_flatten_fails_open_hedge_ticket_and_stops_chase() -> None:
+def test_flatten_supersedes_open_hedge_ticket_and_stops_chase() -> None:
     gateway = OMSGateway()
     orders_logger = CapturingLogger()
     oms = OMS(
@@ -430,9 +430,13 @@ def test_flatten_fails_open_hedge_ticket_and_stops_chase() -> None:
         )
     )
 
-    failed = [record for record in orders_logger.records if record.get("reason") == "ticket_failed"]
-    assert failed
-    assert failed[-1]["fail_reason"] == "flatten_started"
+    superseded = [
+        record
+        for record in orders_logger.records
+        if record.get("reason") == "ticket_superseded"
+    ]
+    assert superseded
+    assert superseded[-1]["supersede_reason"] == "flatten_started"
     assert oms.has_open_hedge_ticket() is False
     assert [
         record

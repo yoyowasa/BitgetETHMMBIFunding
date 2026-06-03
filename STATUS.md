@@ -2882,3 +2882,54 @@ ec1b00a  chore: bulk update after lint & format
 ### 未確定点
 - `ticket_failed=2` は残る。HEDGE IOC pending expiry / cancel 43001 の可観測性改善は次の確認対象。
 - WLDUSDT の 15分 PnL は fee / hedge slip 優勢で、収益性はまだ未確定。
+
+---
+
+## 2026-06-03 P0/P1/P2 収益化確認と HEDGE ticket 可観測性修正
+
+### 観測事実
+- P0 DRY 15分: `runtime_logs\dry_symbol_WLDUSDT_wide22_p0_15min_20260603_120042`
+  - `DRY_RUN=1`、`HALTED=0`、`order_reject=0`、`fill_parse_warning=0`。
+  - `shutdown_cancel_all_done=2`、`shutdown_cancel_all_failed=0`。
+  - `positions_monitor_heartbeat` / `fill_monitor_heartbeat` / `book_rx_rate` あり。
+  - `positions_empty=true`。
+  - `BASE_HALF_SPREAD_BPS=22` / `MIN_HALF_SPREAD_BPS=22` で `expected_edge_bps=16.2`。
+  - `pre_quote_decision=2275`、`quote_any_rate=0.862`。
+  - dry order は `QUOTE_ASK` のみ。`spot_hedge_sell_available_reduce=1444`。
+- P1 live 15分ログ再分析: `runtime_logs\live_symbol_WLDUSDT_after_hedge_done_defer_15min_20260603_015902`
+  - `ticket_failed=2` は `fail_reason=flatten_started`。
+  - 1件目: `filled_qty=63.46 / want_qty=120.0`。
+  - 2件目: `filled_qty=0.0 / want_qty=119.0`。
+  - fill の `price / size / fee` は 0 なし。
+- P2 Bitget public read-only scan:
+  - WLDUSDT: 24h volume 約 `113M USDT`、funding `1.0bps`、futures spread 約 `2.54bps`、spot spread 約 `5.09bps`。
+  - SKYAIUSDT / APRUSDT は funding が高いが spot spread が広く、即 live 候補としてはリスク大。
+  - BTCUSDT / ETHUSDT は liquidity は強いが funding と volatility が低め。
+
+### 推論
+- 現行 WLDUSDT は spread を 22bps に広げると計算上 edge は出るが、既存 spot dust / available 制約により bid が片側化しやすい。
+- `ticket_failed=2` は HEDGE failure というより、flatten/unwind 側の解消処理へ移った ticket の監視上の分類問題。
+- 次の live で見るべき主指標は `ticket_superseded`、実 fill 後の `perp_pos + spot_pos ≒ 0`、片側 quote の継続時間。
+
+### 実装
+- `bot/config.py`
+  - runtime env override 追加: `TARGET_NOTIONAL`、`BASE_HALF_SPREAD_BPS`、`MIN_HALF_SPREAD_BPS`、`QUOTE_REFRESH_MS`、`HEDGE_AGGRESSIVE_BPS`、`HEDGE_DEADLINE_SEC`。
+- `bot/oms/oms.py`
+  - `flatten_started` で open HEDGE ticket を `ticket_failed` ではなく `ticket_superseded` として記録。
+  - `halt` 等の明示失敗は `ticket_failed` のまま維持。
+- `tests/test_config_apis.py`
+  - runtime env override test 追加。
+- `tests/test_hedge_ladder.py`
+  - `ticket_superseded` と `ticket_failed` の分離 test 追加。
+- `tests/test_hedge_ticket_flatten_race.py`
+  - flatten 開始時の期待値を `ticket_superseded` に更新。
+
+### 検証
+- `.venv\Scripts\python.exe -m pytest -q tests\test_config_apis.py`: `3 passed`。
+- `.venv\Scripts\python.exe -m pytest -q tests\test_hedge_ladder.py tests\test_config_apis.py`: `7 passed`。
+- `.venv\Scripts\python.exe -m pytest -q`: `118 passed`。
+- `git diff -- config.yaml`: 差分なし。
+
+### 未確定点
+- DRY では実約定 PnL は検証不可。wide22 の live bounded 15分で fill path を再確認する必要あり。
+- WLDUSDT は spot available 制約により bid が片側化するため、spot dust を手動でフラット化しない限り対称 quote の評価は不完全。
