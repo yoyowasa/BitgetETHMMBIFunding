@@ -3279,3 +3279,49 @@ ec1b00a  chore: bulk update after lint & format
 ### 未確定点
 - 修正後の shutdown spot 残留解消は live bounded で未確認。
 - side-edge guard は約定を減らすが、収益性改善はまだ未確認。
+
+---
+
+## 2026-06-04 shutdown residual 修正後 side-edge guard live bounded 15分
+
+### 観測事実
+- commit `9d4c39e fix: verify shutdown flatten residual positions` push 後に `SIDE_EDGE_GUARD=1` で live bounded 15分を再実行。
+- live 15分 log: `runtime_logs\live_symbol_WLDUSDT_wide22_side_edge_guard_shutdown_verify_15min_20260604_002452`
+  - `HALTED=0`
+  - `order_reject=0`
+  - `fill_parse_warning=0`
+  - `shutdown_flatten_positions_start=1`
+  - `shutdown_flatten_positions_check=4`
+  - `shutdown_flatten_positions_done=1`
+  - `shutdown_flatten_positions_failed=0`
+  - `shutdown_flatten_positions_residual=0`
+  - `shutdown_cancel_all_done=2`
+  - `shutdown_cancel_all_failed=0`
+  - fills `0`
+  - `side_edge_guard_block=3200`
+- shutdown check:
+  - `spot_available=0.00539`
+  - `perp_position=0.0`
+  - `spot_notional=0.002851849`
+  - `flat=true`
+- 終了後 read-only:
+  - `SPOT open orders=0`
+  - `Futures open orders=0`
+  - `Futures WLDUSDT position=0.0`
+  - `SPOT WLD available=0.00539`
+  - `SPOT WLD frozen=0.0`
+- bot.app process remaining なし。
+
+### 推論
+- shutdown residual 確認修正は、少なくとも no-fill run では正常に flat 判定して終了した。
+- side-edge guard は現在の WLDUSDT 条件では quote をかなり抑制し、15分では約定なし。
+- 収益化には「guard を通る favorable basis の時間帯を待つ」か「銘柄/閾値/幅の再探索」が必要。
+
+### 検証
+- read-only で open orders 0 / futures position 0 / spot frozen 0 を確認。
+- ログで `shutdown_flatten_positions_failed=0` / `shutdown_flatten_positions_residual=0` を確認。
+- `git diff -- config.yaml`: 差分なし。
+
+### 未確定点
+- side-edge guard 有効時に実 fill が発生した場合の rough net は未確認。
+- 15分では fills 0 のため、収益性改善の判断は未完了。
