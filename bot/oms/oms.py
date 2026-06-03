@@ -446,6 +446,14 @@ class OMS:
             side = Side.SELL if self._positions.spot_pos > 0 else Side.BUY
             size = abs(self._positions.spot_pos)
             price = spot_bbo.ask if side == Side.BUY else spot_bbo.bid
+            if reason == "shutdown_flatten_positions":
+                aggressive_bps = float(
+                    getattr(self._hedge_cfg, "hedge_aggressive_bps", 0.0) or 0.0
+                )
+                if side == Side.BUY:
+                    price *= 1 + aggressive_bps / 10000.0
+                else:
+                    price *= 1 - aggressive_bps / 10000.0
             client_oid = self._new_client_oid(OrderIntent.FLATTEN, cycle_id)
             if side == Side.SELL:
                 allowed = await self._precheck_spot_flatten_available(

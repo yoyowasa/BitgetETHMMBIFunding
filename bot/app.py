@@ -269,6 +269,54 @@ def _spot_bbo_from_store(gateway, config):
     return book_md.bbo_from_snapshot(snapshot)
 
 
+async def _shutdown_position_snapshot(oms, gateway, config, logger) -> dict:
+    base_coin = config.symbols.spot.symbol.replace("USDT", "")
+    spot_available = None
+    perp_position = None
+    spot_getter = getattr(gateway, "get_spot_available_balance", None)
+    perp_getter = getattr(gateway, "get_perp_position", None)
+    if callable(spot_getter):
+        spot_available = await spot_getter(base_coin)
+        if spot_available is not None:
+            oms.positions.spot_pos = spot_available
+    if callable(perp_getter):
+        perp_position = await perp_getter()
+        if perp_position is not None:
+            oms.positions.perp_pos = perp_position
+    mid_price = None
+    spot_bbo = _spot_bbo_from_store(gateway, config)
+    if spot_bbo is not None:
+        mid_price = book_md.calc_mid(spot_bbo)
+    spot_notional = None if spot_available is None or mid_price is None else abs(spot_available) * mid_price
+    flat = (
+        (perp_position is None or abs(perp_position) <= 1e-12)
+        and (
+            spot_available is None
+            or spot_notional is None
+            or spot_notional <= config.strategy.delta_tolerance_notional
+        )
+    )
+    snapshot = {
+        "spot_available": spot_available,
+        "perp_position": perp_position,
+        "spot_notional": spot_notional,
+        "mid_price": mid_price,
+        "flat": flat,
+    }
+    logger.log(
+        {
+            "event": "shutdown_flatten_positions_check",
+            "intent": "SYSTEM",
+            "source": "shutdown",
+            "mode": "SHUTDOWN",
+            "reason": "shutdown_flatten_positions_check",
+            "leg": "positions",
+            **snapshot,
+        }
+    )
+    return snapshot
+
+
 async def _flatten_positions_on_shutdown(oms, gateway, config, logger) -> bool:
     if os.getenv("SHUTDOWN_FLATTEN_POSITIONS", "0") != "1":
         return True
@@ -284,23 +332,44 @@ async def _flatten_positions_on_shutdown(oms, gateway, config, logger) -> bool:
         }
     )
     try:
-        spot_bbo = _spot_bbo_from_store(gateway, config)
-        if spot_bbo is None:
+        await oms.cancel_all(reason=reason)
+        wait_sec = float(os.getenv("SHUTDOWN_FLATTEN_WAIT_SEC", "3"))
+        max_attempts = int(os.getenv("SHUTDOWN_FLATTEN_MAX_ATTEMPTS", "3"))
+        final_snapshot = None
+        for attempt in range(1, max_attempts + 1):
+            spot_bbo = _spot_bbo_from_store(gateway, config)
+            if spot_bbo is None:
+                logger.log(
+                    {
+                        "event": "shutdown_flatten_positions_failed",
+                        "intent": "SYSTEM",
+                        "source": "shutdown",
+                        "mode": "SHUTDOWN",
+                        "reason": "shutdown_flatten_spot_bbo_unavailable",
+                        "leg": "positions",
+                        "attempt": attempt,
+                    }
+                )
+                return False
+            await _shutdown_position_snapshot(oms, gateway, config, logger)
+            await oms.flatten(spot_bbo, cycle_id=-attempt, reason=reason)
+            await asyncio.sleep(wait_sec)
+            final_snapshot = await _shutdown_position_snapshot(oms, gateway, config, logger)
+            if final_snapshot["flat"]:
+                break
+        if final_snapshot is not None and not final_snapshot["flat"]:
             logger.log(
                 {
                     "event": "shutdown_flatten_positions_failed",
                     "intent": "SYSTEM",
                     "source": "shutdown",
                     "mode": "SHUTDOWN",
-                    "reason": "shutdown_flatten_spot_bbo_unavailable",
+                    "reason": "shutdown_flatten_positions_residual",
                     "leg": "positions",
+                    **final_snapshot,
                 }
             )
             return False
-        await oms.cancel_all(reason=reason)
-        await oms.flatten(spot_bbo, cycle_id=-1, reason=reason)
-        await asyncio.sleep(float(os.getenv("SHUTDOWN_FLATTEN_WAIT_SEC", "3")))
-        await oms.flatten(spot_bbo, cycle_id=-2, reason=reason)
         logger.log(
             {
                 "event": "shutdown_flatten_positions_done",

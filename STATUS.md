@@ -3221,3 +3221,61 @@ ec1b00a  chore: bulk update after lint & format
 ### 未確定点
 - `SIDE_EDGE_GUARD=1` の live bounded で fill 数と rough net が改善するかは未確認。
 - guard が厳しすぎて約定ゼロになる可能性があるため、まず 15分 bounded で通過率と block 率を見る。
+
+---
+
+## 2026-06-04 side-edge guard live bounded 15分と shutdown spot 残留修正
+
+### 観測事実
+- commit `850dbe5 feat: add side edge guard for spot hedge cost` push 後に `SIDE_EDGE_GUARD=1` で live bounded 15分を実行。
+- live 15分 log: `runtime_logs\live_symbol_WLDUSDT_wide22_side_edge_guard_15min_20260604_000546`
+  - `HALTED=0`
+  - `order_reject=0`
+  - `fill_parse_warning=0`
+  - `shutdown_flatten_positions_start=1`
+  - `shutdown_flatten_positions_done=1`
+  - `shutdown_flatten_positions_failed=0`
+  - `shutdown_cancel_all_done=2`
+  - `shutdown_cancel_all_failed=0`
+  - fills `2`
+  - fill の `price / size / fee` は 0 なし。
+  - `side_edge_guard_block=1954`
+  - pre-quote pass/block:
+    - bid pass `787` / block `1438`
+    - ask pass `1591` / block `634`
+  - side-edge 分布:
+    - bid P50 `-1.1856bps`, P90 `1.5585bps`
+    - ask P50 `0.8236bps`, P90 `3.0631bps`
+- 終了後 read-only で `SPOT WLD available=102.09539` が残留。futures position / open orders は 0。
+- `scripts\flatten_account_state.py --execute` を `FLATTEN_ACCOUNT_OK=1` 付きで実行し、spot sell `102.09539` を実行。
+- 手動 flatten 後 read-only:
+  - `SPOT open orders=0`
+  - `Futures open orders=0`
+  - `Futures WLDUSDT position=0.0`
+  - `SPOT WLD available=0.00539`
+  - `SPOT WLD frozen=0.0`
+
+### 推論
+- side-edge guard は負 edge の片側 quote を抑制し、fill 数を大きく減らした。
+- ただし ask は一部通り、実 fill 後に shutdown spot flatten が部分約定で終わった。
+- shutdown flatten は spot IOC 注文を出したが、約定確認前に `shutdown_flatten_positions_done` を出したため、実口座 spot long が残った。
+
+### 実装
+- `bot/oms/oms.py`
+  - `shutdown_flatten_positions` の spot flatten 価格を `hedge_aggressive_bps` 分だけ aggressive にした。
+- `bot/app.py`
+  - shutdown flatten 前後に REST read-only で spot available / futures position を確認。
+  - REST 値を OMS internal position に同期してから flatten する。
+  - fresh BBO で最大 `SHUTDOWN_FLATTEN_MAX_ATTEMPTS` 回 retry。
+  - 残留が `delta_tolerance_notional` を超える場合は `shutdown_flatten_positions_failed` / `shutdown_flatten_positions_residual` を出し、done 扱いしない。
+  - `shutdown_flatten_positions_check` を追加。
+
+### 検証
+- `.venv\Scripts\python.exe -m py_compile bot\app.py bot\oms\oms.py`: pass。
+- `.venv\Scripts\python.exe -m pytest -q tests\test_stop_bot_scripts.py tests\test_hedge_ticket_flatten_race.py tests\test_total_edge.py`: `30 passed`。
+- `.venv\Scripts\python.exe -m pytest -q`: `123 passed`。
+- `git diff -- config.yaml`: 差分なし。
+
+### 未確定点
+- 修正後の shutdown spot 残留解消は live bounded で未確認。
+- side-edge guard は約定を減らすが、収益性改善はまだ未確認。
