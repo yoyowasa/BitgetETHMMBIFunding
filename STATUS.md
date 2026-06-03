@@ -2933,3 +2933,38 @@ ec1b00a  chore: bulk update after lint & format
 ### 未確定点
 - DRY では実約定 PnL は検証不可。wide22 の live bounded 15分で fill path を再確認する必要あり。
 - WLDUSDT は spot available 制約により bid が片側化するため、spot dust を手動でフラット化しない限り対称 quote の評価は不完全。
+
+---
+
+## 2026-06-03 read-only account state helper と live bounded 前確認
+
+### 観測事実
+- `bot.app` 実行中プロセスなし。
+- `scripts\check_readonly_account_state.py` を追加。
+  - authenticated GET endpoint のみ使用。
+  - 注文、キャンセル、決済、設定変更なし。
+- 初回実行で futures pending payload `{"entrustedList": null}` を wrapper dict と誤カウントし、`futures_open_orders=1` と表示。
+- parser 修正後 read-only:
+  - `SPOT open orders=0`
+  - `Futures open orders=0`
+  - `Futures WLDUSDT position=0.0`
+  - `SPOT WLD available=1.58054`
+  - `SPOT WLD frozen=0.0`
+
+### 推論
+- 実口座残留は WLD spot dust のみ。
+- WLD spot dust は約 `0.6 USDT` で、min-notional 未満のため通常注文では清算不能。
+- wide22 live bounded 15分は実施可能だが、bid 側は spot available 制約で片側化しやすい。
+
+### 実装
+- `scripts/check_readonly_account_state.py`
+  - spot/futures open orders、futures position、spot available/frozen を JSON 出力。
+  - Bitget pending order wrapper の `entrustedList=null` を open orders 0 と扱う `_order_rows()` を追加。
+
+### 検証
+- `.venv\Scripts\python.exe -m py_compile scripts\check_readonly_account_state.py`: pass。
+- `$env:SYMBOL='WLDUSDT'; .venv\Scripts\python.exe scripts\check_readonly_account_state.py --config config.yaml`: read-only 実行成功。
+
+### 未確定点
+- wide22 live bounded 15分で実 fill が発生するかは未確認。
+- `ticket_superseded` が live fill path で想定通り出るかは未確認。
