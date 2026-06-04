@@ -267,6 +267,7 @@ def test_max_position_cap_reduces_quote_size_before_flatten(monkeypatch) -> None
     assert reductions
     assert reductions[-1]["leg"] == "ask"
     assert reductions[-1]["original_size"] > reductions[-1]["capped_size"]
+    assert reductions[-1]["effective_max_position_quote_notional"] < 100.0
     pre_quote = [r for r in logger.records if r.get("reason") == "pre_quote_decision"]
     assert pre_quote[-1]["max_position_quote_reduced"] is True
     assert pre_quote[-1]["size_ask_before_max_position_cap"] > oms.last_update_quotes["ask_size"]

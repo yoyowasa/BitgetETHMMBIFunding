@@ -1377,7 +1377,7 @@ class MMFundingStrategy:
     ) -> float:
         if size <= 0:
             return 0.0
-        max_notional = self._config.risk.max_position_notional
+        max_notional = self._effective_max_position_quote_notional()
         if max_notional <= 0 or mid_perp <= 0 or mid_spot <= 0:
             return max(size, 0.0)
         perp_max_qty = max_notional / mid_perp
@@ -1422,6 +1422,9 @@ class MMFundingStrategy:
                 "spot_notional": abs(spot_pos) * mid_spot,
                 "perp_notional": abs(perp_pos) * mid_perp,
                 "max_position_notional": self._config.risk.max_position_notional,
+                "effective_max_position_quote_notional": (
+                    self._effective_max_position_quote_notional()
+                ),
                 "action": (
                     "suppress_quote_size"
                     if capped_size <= 0
@@ -1429,6 +1432,18 @@ class MMFundingStrategy:
                 ),
             }
         )
+
+    def _effective_max_position_quote_notional(self) -> float:
+        max_notional = self._config.risk.max_position_notional
+        if max_notional <= 0:
+            return max_notional
+        quote_buffer_bps = max(
+            100.0,
+            self._config.cost.fee_taker_spot_bps
+            + self._config.cost.slippage_bps
+            + self._config.strategy.adverse_buffer_bps,
+        )
+        return max(max_notional * (1.0 - quote_buffer_bps / 10000.0), 0.0)
 
     @staticmethod
     def _mid_move_bps(mid_now: float, mid_prev: float | None) -> float | None:

@@ -3737,3 +3737,77 @@ ec1b00a  chore: bulk update after lint & format
 ### 未確定点
 - 修正後の `SKYAIUSDT wide18` live bounded再確認は未実施。
 - bounded短時間ではshutdown flattenが入るため、収益性評価は継続運用と分けて見る必要がある。
+
+---
+
+## 2026-06-05 SKYAIUSDT wide18 cap修正後 live 15分再確認と1% buffer追加
+
+### 観測事実
+- commit `e05352f fix: cap quote size before max position flatten` 後に `SKYAIUSDT` wide18 live bounded 15分を実行。
+- 起動前read-only:
+  - `SPOT open orders=0`
+  - `Futures open orders=0`
+  - `Futures SKYAIUSDT position=0.0`
+  - `SPOT SKYAI available=0.001`
+  - `SPOT SKYAI frozen=0.0`
+- live 15分 log: `runtime_logs\live_symbol_SKYAIUSDT_wide18_cap_fix_15min_20260605_001258`
+- safety:
+  - `HALTED=0`
+  - `order_reject=0`
+  - `fill_parse_warning=0`
+  - `startup_open_spot_balance_detected=0`
+  - `shutdown_cancel_all_done=1`
+  - `shutdown_cancel_all_failed=0`
+  - `shutdown_flatten_positions_done=1`
+  - `shutdown_flatten_positions_failed=0`
+  - `book_rx_rate=14`
+  - `fill_monitor_heartbeat=15`
+  - `positions_monitor_heartbeat=15`
+- order / fill:
+  - `order_new=678`
+  - `order_cancel=671`
+  - `resp_code 00000=1346`
+  - `resp_code 43001=3`
+  - text `22002=5`
+  - fills `10`
+  - fill の `price / size / fee` 0 件数はすべて `0`
+  - `max_position_quote_reduce=2074`
+  - `max_position_quote_block=0`
+  - `max_position=3`
+- rough:
+  - `QUOTE_ASK/HEDGE` rough known net `0.4471750799999987 USDT`
+  - `pnl_net_sum=-2.180671950834993`
+- 終了後read-only:
+  - `SPOT open orders=0`
+  - `Futures open orders=0`
+  - `Futures SKYAIUSDT position=0.0`
+  - `SPOT SKYAI available=0.005`
+  - `SPOT SKYAI frozen=0.0`
+- fill集計:
+  - futures quote sell notional `160.03518`, fee `0.02240492 USDT`
+  - spot hedge buy notional `159.5656`, fee概算 `0.1595656 USDT`
+  - futures flatten buy notional `100.1545`, fee `0.04206488 USDT`
+  - spot flatten sell notional `99.663409`, fee `0.09966341 USDT`
+- capは発火したが、上限ぴったりまで許容したため、価格変動とspot base fee込みで `max_position` に再到達した。
+
+### 推論
+- 前回修正は方向性は正しいが、上限に余白がなく不十分。
+- `max_position_notional=100` に対して quote cap は少なくとも spot taker fee / slippage / 短期価格変動ぶんの余白が必要。
+- 短時間boundedではshutdown flattenの影響もあるが、運転中 `max_position` が残る限り次のlive延長は不可。
+
+### 実装
+- `bot\strategy\mm_funding.py`
+  - quote cap に `effective_max_position_quote_notional` を導入。
+  - `max_position_notional` の1%をbufferとして予約し、quote前capは `max_position_notional * 0.99` を上限にする。
+  - bufferは `max(100bps, spot taker fee + slippage + adverse_buffer)`。
+  - `max_position_quote_reduce/block` log に `effective_max_position_quote_notional` を追加。
+- `tests\test_phase_d_strategy.py`
+  - max position quote cap が実上限より小さいeffective上限を使うことを確認。
+
+### 検証
+- `.venv\Scripts\python.exe -m py_compile bot\strategy\mm_funding.py tests\test_phase_d_strategy.py`: pass。
+- `.venv\Scripts\python.exe -m pytest -q tests\test_phase_d_strategy.py`: `5 passed`。
+
+### 未確定点
+- 1% buffer後の live bounded 再確認は未実施。
+- 次の確認条件は `max_position=0`, `max_position_quote_reduce` 出力あり, 運転中FLATTENなし。
