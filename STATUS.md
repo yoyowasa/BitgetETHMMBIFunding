@@ -3811,3 +3811,83 @@ ec1b00a  chore: bulk update after lint & format
 ### 未確定点
 - 1% buffer後の live bounded 再確認は未実施。
 - 次の確認条件は `max_position=0`, `max_position_quote_reduce` 出力あり, 運転中FLATTENなし。
+
+---
+
+## 2026-06-05 SKYAIUSDT wide18 1% buffer後 live 15分確認とshutdown fill drain修正
+
+### 観測事実
+- commit `114f2f1 fix: reserve buffer in max position quote cap` 後に `SKYAIUSDT` wide18 live bounded 15分を実行。
+- live 15分 log: `runtime_logs\live_symbol_SKYAIUSDT_wide18_cap_buffer_15min_20260605_003050`
+- 起動前read-only:
+  - `SPOT open orders=0`
+  - `Futures open orders=0`
+  - `Futures SKYAIUSDT position=0.0`
+  - `SPOT SKYAI available=0.005`
+  - `SPOT SKYAI frozen=0.0`
+- safety:
+  - `HALTED=0`
+  - `order_reject=0`
+  - `fill_parse_warning=0`
+  - `resp_code 22002=0`
+  - `shutdown_cancel_all_done=1`
+  - `shutdown_cancel_all_failed=0`
+  - `shutdown_flatten_positions_done=1`
+  - `shutdown_flatten_positions_failed=0`
+- order / fill:
+  - `order_new=259`
+  - `order_cancel=255`
+  - `resp_code 00000=512`
+  - `resp_code 43001=2`（text集計では5）
+  - `fills=4`
+  - fill の `price / size / fee` 0 件数はすべて `0`
+  - `max_position_quote_reduce=1639`
+  - `max_position_quote_block=637`
+  - `max_position=0`
+  - `unhedged_exceeded=0`
+- 約定内訳:
+  - `USDT-FUTURES:QUOTE_ASK` count `2`, sell qty `551`
+  - `SPOT:HEDGE` count `2`, buy qty `551`
+  - `fills.jsonl` に shutdown `FLATTEN` fill は出ていない。
+- shutdown時:
+  - flatten前 snapshot: `spot_available=550.454`, `perp_position=-551.0`, `spot_notional=98.68814539`, `flat=false`
+  - flatten後 snapshot: `spot_available=0.004`, `perp_position=0.0`, `spot_notional=0.00071714`, `flat=true`
+  - `orders.jsonl` には futures market buy `551.0` と spot IOC sell `550.45` の shutdown FLATTEN 注文がある。
+- 終了後read-only:
+  - `SPOT open orders=0`
+  - `Futures open orders=0`
+  - `Futures SKYAIUSDT position=0.0`
+  - `SPOT SKYAI available=0.004`
+  - `SPOT SKYAI frozen=0.0`
+- rough:
+  - `QUOTE_ASK/HEDGE` rough known net `0.16062251 USDT`
+  - `pnl_net_sum=-2.4151776587999993`
+
+### 推論
+- 1% bufferで運転中 `max_position` は解消。運用安全性は改善。
+- 収益性はまだ不合格。短時間boundedでは hedged position を shutdown flatten するため、basis / funding / taker fee が粗利を上回る。
+- shutdown flatten fill が `fills.jsonl` に出ない主因は、finallyで全taskを先にcancelし、private WS / fill monitor停止後にflattenしていたこと。
+- bounded収益評価は「稼働中QUOTE/HEDGE」と「終了時FLATTEN」の損益を分けて読む必要がある。
+
+### 実装
+- `bot\app.py`
+  - shutdown時は先に `risk.halt("shutdown")` で新規quoteを止める。
+  - private WS / fill monitor を生かしたまま `_flatten_positions_on_shutdown()` と `_cancel_all_on_shutdown()` を実行し、その後task cancelする順序へ変更。
+  - shutdown flatten後に `oms.drain_fills_once()` を呼び、`shutdown_fill_drain_done` をログ出力。
+- `bot\oms\oms.py`
+  - `drain_fills_once()` を追加。
+  - `store.fill.find()` の未処理fillを既存parser / dedupe / ingest経路で同期処理。
+  - `fill_drain_done` / `fill_drain_failed` をログ出力。
+- `tests\test_hedge_ticket_flatten_race.py`
+  - shutdown store fill が1回だけ `fills_logger` に落ち、2回目はdedupeされるテストを追加。
+- `tests\test_stop_bot_scripts.py`
+  - shutdown fill drain と、shutdown flatten前にtask cancelしない順序を固定。
+
+### 検証
+- `.venv\Scripts\python.exe -m py_compile bot\oms\oms.py bot\app.py tests\test_hedge_ticket_flatten_race.py tests\test_stop_bot_scripts.py`: pass。
+- `.venv\Scripts\python.exe -m pytest -q tests\test_hedge_ticket_flatten_race.py tests\test_stop_bot_scripts.py`: `30 passed`。
+- `config.yaml` 差分なし。
+
+### 未確定点
+- shutdown fill drain修正後の live bounded 再確認は未実施。
+- 収益化判断には shutdown flatten fill 捕捉後の実損益再測定と、保有/exit方針の再設計が必要。

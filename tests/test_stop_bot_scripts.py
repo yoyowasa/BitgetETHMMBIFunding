@@ -60,6 +60,18 @@ def test_app_supports_shutdown_flatten_positions() -> None:
     assert "shutdown_flatten_positions_start" in app
     assert "shutdown_flatten_positions_done" in app
     assert "shutdown_flatten_spot_bbo_unavailable" in app
+    assert "shutdown_fill_drain_done" in app
+    assert "drain_fills_once" in app
+
+
+def test_app_keeps_fill_monitor_alive_until_shutdown_flatten() -> None:
+    app = (ROOT / "bot" / "app.py").read_text(encoding="utf-8")
+
+    finally_index = app.index("finally:")
+    flatten_index = app.index("_flatten_positions_on_shutdown", finally_index)
+    cancel_tasks_index = app.index("task.cancel()", flatten_index)
+    assert flatten_index < cancel_tasks_index
+    assert 'risk.halt("shutdown")' in app
 
 
 def test_shutdown_position_snapshot_treats_below_min_notional_spot_as_flat(monkeypatch) -> None:

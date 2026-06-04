@@ -672,6 +672,55 @@ class OMS:
             self._log_fill_monitor_heartbeat(len(rows), monitor_exception)
             await asyncio.sleep(poll_interval)
 
+    async def drain_fills_once(self, *, source: str = "fill_drain") -> int:
+        try:
+            rows = list(self._gateway.store.fill.find())
+        except Exception as exc:
+            self._last_fill_monitor_exception = repr(exc)
+            self._orders_logger.log(
+                {
+                    "ts": time.time(),
+                    "event": "risk",
+                    "intent": "SYSTEM",
+                    "source": "oms",
+                    "mode": "SHUTDOWN",
+                    "reason": "fill_drain_failed",
+                    "leg": "fill",
+                    "error": repr(exc),
+                }
+            )
+            return 0
+        drained = 0
+        for row in rows:
+            event = self._parse_fill(row)
+            if event is None:
+                continue
+            dedupe_key = f"{event.inst_type.value}:{event.fill_id}"
+            if dedupe_key in self._seen_fills:
+                continue
+            self._seen_fills.add(dedupe_key)
+            self._last_fill_ts = event.ts
+            self._last_fill_id = event.fill_id
+            await self.ingest_fill(event, simulated=False, source=source)
+            drained += 1
+        self._orders_logger.log(
+            {
+                "ts": time.time(),
+                "event": "state",
+                "intent": "SYSTEM",
+                "source": "oms",
+                "mode": "SHUTDOWN",
+                "reason": "fill_drain_done",
+                "leg": "fill",
+                "store_fill_count": len(rows),
+                "drained_fill_count": drained,
+                "seen_fill_count": len(self._seen_fills),
+                "last_fill_ts": self._last_fill_ts,
+                "last_fill_id": self._last_fill_id,
+            }
+        )
+        return drained
+
     def _log_fill_monitor_heartbeat(
         self,
         store_fill_count: int,

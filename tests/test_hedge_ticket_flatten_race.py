@@ -932,6 +932,54 @@ def test_reduce_only_22002_uses_rest_when_position_store_is_stale() -> None:
     assert flat_logs[-1]["action_taken"] == "skip_reject_streak"
 
 
+def test_drain_fills_once_logs_shutdown_store_fills_once() -> None:
+    gateway = OMSGateway()
+    fill_rows = [
+        {
+            "instType": "SPOT",
+            "instId": "ETHUSDT",
+            "side": "sell",
+            "orderId": "spot-flatten-order",
+            "clientOid": "FLATTEN-shutdown-1",
+            "tradeId": "spot-flatten-fill-1",
+            "priceAvg": "2000",
+            "size": "0.01",
+            "fee": "0.02",
+            "feeCoin": "USDT",
+            "ts": "1710000000000",
+        }
+    ]
+    gateway.store = SimpleNamespace(
+        positions=SimpleNamespace(find=lambda: []),
+        fill=SimpleNamespace(find=lambda: fill_rows),
+    )
+    orders_logger = CapturingLogger()
+    fills_logger = CapturingLogger()
+    oms = OMS(
+        gateway,
+        _config(),
+        risk=RiskGuards(_config().risk),
+        orders_logger=orders_logger,
+        fills_logger=fills_logger,
+    )
+
+    drained_first = asyncio.run(oms.drain_fills_once(source="shutdown_fill_drain"))
+    drained_second = asyncio.run(oms.drain_fills_once(source="shutdown_fill_drain"))
+
+    assert drained_first == 1
+    assert drained_second == 0
+    assert len(fills_logger.records) == 1
+    assert fills_logger.records[0]["intent"] == OrderIntent.FLATTEN.value
+    assert fills_logger.records[0]["source"] == "shutdown_fill_drain"
+    drain_logs = [
+        record
+        for record in orders_logger.records
+        if record.get("reason") == "fill_drain_done"
+    ]
+    assert drain_logs[-1]["drained_fill_count"] == 0
+    assert drain_logs[-1]["seen_fill_count"] == 1
+
+
 def test_post_only_quote_45001_does_not_increment_reject_streak() -> None:
     gateway = OMSGateway(place_order_response={"code": "45001", "msg": "Unknown error"})
     orders_logger = CapturingLogger()

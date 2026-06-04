@@ -368,9 +368,40 @@ async def _flatten_positions_on_shutdown(oms, gateway, config, logger) -> bool:
             await _shutdown_position_snapshot(oms, gateway, config, logger)
             await oms.flatten(spot_bbo, cycle_id=-attempt, reason=reason)
             await asyncio.sleep(wait_sec)
+            drain = getattr(oms, "drain_fills_once", None)
+            drained = 0
+            if callable(drain):
+                drained = await drain(source="shutdown_fill_drain")
+                logger.log(
+                    {
+                        "event": "shutdown_fill_drain_done",
+                        "intent": "SYSTEM",
+                        "source": "shutdown",
+                        "mode": "SHUTDOWN",
+                        "reason": "shutdown_fill_drain_done",
+                        "leg": "fill",
+                        "attempt": attempt,
+                        "drained_fill_count": drained,
+                    }
+                )
             final_snapshot = await _shutdown_position_snapshot(oms, gateway, config, logger)
             if final_snapshot["flat"]:
                 break
+        drain = getattr(oms, "drain_fills_once", None)
+        if callable(drain):
+            drained = await drain(source="shutdown_fill_drain_final")
+            logger.log(
+                {
+                    "event": "shutdown_fill_drain_done",
+                    "intent": "SYSTEM",
+                    "source": "shutdown",
+                    "mode": "SHUTDOWN",
+                    "reason": "shutdown_fill_drain_final_done",
+                    "leg": "fill",
+                    "attempt": "final",
+                    "drained_fill_count": drained,
+                }
+            )
         if final_snapshot is not None and not final_snapshot["flat"]:
             logger.log(
                 {
@@ -855,11 +886,8 @@ async def _run() -> None:
                 }
             )
         finally:
-            for task in tasks:
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
             if private_enabled:
+                risk.halt("shutdown")
                 if not config.strategy.dry_run:
                     ok = await _flatten_positions_on_shutdown(
                         oms, gateway, config, system_logger
@@ -869,6 +897,10 @@ async def _run() -> None:
                 ok = await _cancel_all_on_shutdown(oms, system_logger)
                 if not ok:
                     raise SystemExit(1)
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
             _restore_signal_handlers(signal_handlers)
 
 
