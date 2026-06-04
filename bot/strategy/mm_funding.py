@@ -951,6 +951,60 @@ class MMFundingStrategy:
         elif perp_pos < target_perp:
             size_bid *= 1.2
 
+        max_position_quote_reduced = False
+        max_position_quote_block = False
+        size_bid_before_max_position_cap = size_bid
+        size_ask_before_max_position_cap = size_ask
+        max_position_notional = self._config.risk.max_position_notional
+        if max_position_notional > 0:
+            size_bid = self._cap_quote_size_for_max_position(
+                size_bid,
+                perp_pos=perp_pos,
+                spot_pos=spot_pos,
+                perp_sign=1.0,
+                spot_sign=-1.0,
+                mid_perp=mid_perp,
+                mid_spot=mid_spot,
+            )
+            size_ask = self._cap_quote_size_for_max_position(
+                size_ask,
+                perp_pos=perp_pos,
+                spot_pos=spot_pos,
+                perp_sign=-1.0,
+                spot_sign=1.0,
+                mid_perp=mid_perp,
+                mid_spot=mid_spot,
+            )
+            max_position_quote_reduced = (
+                size_bid + 1e-12 < size_bid_before_max_position_cap
+                or size_ask + 1e-12 < size_ask_before_max_position_cap
+            )
+            max_position_quote_block = (
+                max_position_quote_reduced and size_bid <= 0 and size_ask <= 0
+            )
+            if size_bid + 1e-12 < size_bid_before_max_position_cap:
+                self._log_max_position_quote_cap(
+                    now=now,
+                    leg="bid",
+                    original_size=size_bid_before_max_position_cap,
+                    capped_size=size_bid,
+                    perp_pos=perp_pos,
+                    spot_pos=spot_pos,
+                    mid_perp=mid_perp,
+                    mid_spot=mid_spot,
+                )
+            if size_ask + 1e-12 < size_ask_before_max_position_cap:
+                self._log_max_position_quote_cap(
+                    now=now,
+                    leg="ask",
+                    original_size=size_ask_before_max_position_cap,
+                    capped_size=size_ask,
+                    perp_pos=perp_pos,
+                    spot_pos=spot_pos,
+                    mid_perp=mid_perp,
+                    mid_spot=mid_spot,
+                )
+
         spot_hedge_sell_available = None
         spot_hedge_sell_required = None
         spot_hedge_sell_adjusted = None
@@ -1077,6 +1131,8 @@ class MMFundingStrategy:
             final_block_reason=(
                 "side_edge_guard_block"
                 if size_bid <= 0 and size_ask <= 0 and (side_edge_block_bid or side_edge_block_ask)
+                else "max_position_quote_block"
+                if max_position_quote_block
                 else
                 "one_sided_quote_suppressed"
                 if size_bid <= 0 and size_ask <= 0
@@ -1108,6 +1164,10 @@ class MMFundingStrategy:
             spot_hedge_sell_required=spot_hedge_sell_required,
             spot_hedge_sell_adjusted=spot_hedge_sell_adjusted,
             spot_hedge_sell_available_block=spot_hedge_sell_available_block,
+            max_position_quote_reduced=max_position_quote_reduced,
+            max_position_quote_block=max_position_quote_block,
+            size_bid_before_max_position_cap=size_bid_before_max_position_cap,
+            size_ask_before_max_position_cap=size_ask_before_max_position_cap,
         )
         await self._oms.update_quotes(
             bid_px=bid_px,
@@ -1297,6 +1357,80 @@ class MMFundingStrategy:
         return max(constraints.adjust_qty(size), 0.0)
 
     @staticmethod
+    def _remaining_qty_to_abs_limit(position: float, signed_qty: float, max_qty: float) -> float:
+        if max_qty <= 0:
+            return 0.0
+        if signed_qty > 0:
+            return max(max_qty - position, 0.0)
+        return max(position + max_qty, 0.0)
+
+    def _cap_quote_size_for_max_position(
+        self,
+        size: float,
+        *,
+        perp_pos: float,
+        spot_pos: float,
+        perp_sign: float,
+        spot_sign: float,
+        mid_perp: float,
+        mid_spot: float,
+    ) -> float:
+        if size <= 0:
+            return 0.0
+        max_notional = self._config.risk.max_position_notional
+        if max_notional <= 0 or mid_perp <= 0 or mid_spot <= 0:
+            return max(size, 0.0)
+        perp_max_qty = max_notional / mid_perp
+        spot_max_qty = max_notional / mid_spot
+        capped = min(
+            size,
+            self._remaining_qty_to_abs_limit(perp_pos, perp_sign, perp_max_qty),
+            self._remaining_qty_to_abs_limit(spot_pos, spot_sign, spot_max_qty),
+        )
+        return self._quote_size_after_constraints(capped)
+
+    def _log_max_position_quote_cap(
+        self,
+        *,
+        now: float,
+        leg: str,
+        original_size: float,
+        capped_size: float,
+        perp_pos: float,
+        spot_pos: float,
+        mid_perp: float,
+        mid_spot: float,
+    ) -> None:
+        self._decision_logger.log(
+            {
+                "ts": now,
+                "event": "risk",
+                "intent": "quote",
+                "source": "strategy",
+                "mode": self._state.value,
+                "reason": (
+                    "max_position_quote_block"
+                    if capped_size <= 0
+                    else "max_position_quote_reduce"
+                ),
+                "leg": leg,
+                "cycle_id": self._cycle_id,
+                "original_size": original_size,
+                "capped_size": capped_size,
+                "spot_pos": spot_pos,
+                "perp_pos": perp_pos,
+                "spot_notional": abs(spot_pos) * mid_spot,
+                "perp_notional": abs(perp_pos) * mid_perp,
+                "max_position_notional": self._config.risk.max_position_notional,
+                "action": (
+                    "suppress_quote_size"
+                    if capped_size <= 0
+                    else "reduce_quote_size"
+                ),
+            }
+        )
+
+    @staticmethod
     def _mid_move_bps(mid_now: float, mid_prev: float | None) -> float | None:
         if mid_prev is None or mid_prev <= 0:
             return None
@@ -1423,6 +1557,10 @@ class MMFundingStrategy:
         spot_hedge_sell_required: float | None = None,
         spot_hedge_sell_adjusted: float | None = None,
         spot_hedge_sell_available_block: bool = False,
+        max_position_quote_reduced: bool = False,
+        max_position_quote_block: bool = False,
+        size_bid_before_max_position_cap: float | None = None,
+        size_ask_before_max_position_cap: float | None = None,
     ) -> None:
         active_quotes = self._active_quote_snapshot()
         final_should_quote_any = final_should_quote_bid or final_should_quote_ask
@@ -1483,6 +1621,10 @@ class MMFundingStrategy:
                 "spot_hedge_sell_required": spot_hedge_sell_required,
                 "spot_hedge_sell_adjusted": spot_hedge_sell_adjusted,
                 "spot_hedge_sell_available_block": spot_hedge_sell_available_block,
+                "max_position_quote_reduced": max_position_quote_reduced,
+                "max_position_quote_block": max_position_quote_block,
+                "size_bid_before_max_position_cap": size_bid_before_max_position_cap,
+                "size_ask_before_max_position_cap": size_ask_before_max_position_cap,
                 "final_should_quote_bid": final_should_quote_bid,
                 "final_should_quote_ask": final_should_quote_ask,
                 "final_should_quote_any": final_should_quote_any,

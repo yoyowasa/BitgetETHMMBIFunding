@@ -235,3 +235,38 @@ def test_spot_available_fee_shortfall_reduces_bid_quote_size(monkeypatch) -> Non
     assert pre_quote[-1]["final_should_quote_bid"] is True
     assert pre_quote[-1]["spot_hedge_sell_available_block"] is False
     assert pre_quote[-1]["spot_hedge_sell_adjusted"] == 0.01
+
+
+def test_max_position_cap_reduces_quote_size_before_flatten(monkeypatch) -> None:
+    from bot.strategy import mm_funding as module
+
+    monkeypatch.setattr(module.book_md, "snapshot_from_store", _snapshot_from_store)
+    monkeypatch.setattr(module.book_md, "bbo_from_snapshot", lambda snapshot: SimpleNamespace(bid=snapshot.bids[0][0], ask=snapshot.asks[0][0], bid_size=snapshot.bids[0][1], ask_size=snapshot.asks[0][1], ts=snapshot.ts))
+    monkeypatch.setattr(module.book_md, "calc_mid", lambda bbo: (bbo.bid + bbo.ask) / 2.0)
+    monkeypatch.setattr(module.book_md, "calc_microprice", lambda bbo: (bbo.ask * bbo.bid_size + bbo.bid * bbo.ask_size) / (bbo.bid_size + bbo.ask_size))
+    monkeypatch.setattr(module.book_md, "calc_obi", lambda snapshot: 0.0)
+
+    config = _config()
+    config.risk.max_position_notional = 100.0
+    funding_cache = SimpleNamespace(last=FundingInfo(funding_rate=0.01, next_update_time=None, interval_sec=None, ts=time.time()))
+    oms = DummyOMS()
+    oms.positions.spot_pos = 0.5
+    oms.positions.perp_pos = -0.5
+    logger = DummyLogger()
+    strategy = MMFundingStrategy(config, funding_cache, oms, DummyRisk(), logger)
+
+    import asyncio
+    asyncio.run(strategy.step())
+
+    assert oms.flatten_calls == []
+    assert oms.last_update_quotes is not None
+    assert 0.0 < oms.last_update_quotes["ask_size"] <= 0.5
+    reductions = [
+        r for r in logger.records if r.get("reason") == "max_position_quote_reduce"
+    ]
+    assert reductions
+    assert reductions[-1]["leg"] == "ask"
+    assert reductions[-1]["original_size"] > reductions[-1]["capped_size"]
+    pre_quote = [r for r in logger.records if r.get("reason") == "pre_quote_decision"]
+    assert pre_quote[-1]["max_position_quote_reduced"] is True
+    assert pre_quote[-1]["size_ask_before_max_position_cap"] > oms.last_update_quotes["ask_size"]

@@ -3649,3 +3649,91 @@ ec1b00a  chore: bulk update after lint & format
 ### 未確定点
 - wide18の実fill頻度、post-only reject有無、HEDGE/UNWIND/FLATTEN実約定パス。
 - 次に進めるなら `SKYAIUSDT` wide18 の live bounded 15分が最小の実約定確認。
+
+---
+
+## 2026-06-04 SKYAIUSDT wide18 live bounded 15分とmax position quote cap修正
+
+### 観測事実
+- 起動前read-only:
+  - `SPOT open orders=0`
+  - `Futures open orders=0`
+  - `Futures SKYAIUSDT position=0.0`
+  - `SPOT SKYAI available=0.0`
+  - `SPOT SKYAI frozen=0.0`
+- `SKYAIUSDT` wide18 live bounded 15分を実行。
+  - log: `runtime_logs\live_symbol_SKYAIUSDT_wide18_side_edge_guard_15min_20260604_223341`
+  - `DRY_RUN=0`
+  - `SYMBOL=SKYAIUSDT`
+  - `BASE_HALF_SPREAD_BPS=18`
+  - `MIN_HALF_SPREAD_BPS=18`
+  - `SIDE_EDGE_GUARD=1`
+  - `SIDE_EDGE_MIN_BPS=0`
+- safety:
+  - `HALTED=0`
+  - `order_reject=0`
+  - `fill_parse_warning=0`
+  - `startup_open_spot_balance_detected=0`
+  - `shutdown_cancel_all_done=1`
+  - `shutdown_cancel_all_failed=0`
+  - `shutdown_flatten_positions_done=1`
+  - `shutdown_flatten_positions_failed=0`
+  - `book_rx_rate=14`
+  - `fill_monitor_heartbeat=15`
+  - `positions_monitor_heartbeat=15`
+- order / fill:
+  - `order_new=628`
+  - `order_cancel=616`
+  - `resp_code 00000=1238`
+  - `resp_code 43001=6`
+  - text `22002=3`
+  - fills `17`
+  - fill の `price / size / fee` 0 件数はすべて `0`
+  - intents: `QUOTE_ASK=1230`, `FLATTEN=8`, `HEDGE=6`
+- rough QUOTE/HEDGE:
+  - `QUOTE_ASK` fills `5`, qty `1524`
+  - `SPOT:HEDGE` fills `4`, qty `1199`
+  - rough `QUOTE_ASK/HEDGE` net known `0.33141224999999797 USDT`
+- 実fill集計:
+  - futures quote sell notional `279.98562`, fee `0.03919797 USDT`
+  - spot hedge buy notional `219.55042`, fee概算 `0.21955042 USDT`
+  - futures flatten buy notional `280.3229`, fee `0.11773561 USDT`
+  - spot flatten sell notional `219.6888662`, fee `0.21968886 USDT`
+  - spot手数料とFLATTEN込みでは手数料/flattenコストが粗利を上回る。
+- pnl:
+  - `pnl_net_sum=-0.6871733734999865`
+  - `pnl_nonzero_rows=6`
+- 終了後read-only:
+  - `SPOT open orders=0`
+  - `Futures open orders=0`
+  - `Futures SKYAIUSDT position=0.0`
+  - `SPOT SKYAI available=0.001`
+  - `SPOT SKYAI frozen=0.0`
+  - `spot_notional=0.000183865`, `spot_flat_notional_threshold=1.0`, `flat=true`
+- ログ上、`max_position` が発生し、複数回の `FLATTEN` が走った。
+- 原因箇所:
+  - `bot\strategy\mm_funding.py` は `abs(spot_pos) * mid_spot > max_position_notional` または `abs(perp_pos) * mid_perp > max_position_notional` になってから `flatten(reason="max_position")` していた。
+  - `target_notional=50` でも連続約定で片脚 `~100 USDT` を超え、運転中FLATTENが発生し得る。
+
+### 推論
+- safetyは合格。実fillパスも `QUOTE_ASK -> SPOT HEDGE -> FLATTEN` まで通った。
+- 収益性は不合格。短時間boundedでFLATTENが入ると、spot taker feeとflatten feeが粗利を消す。
+- 主因はedge不足ではなく、max positionを超えた後にFLATTENする設計。quote前に約定後片脚上限を超えるサイズを抑制すべき。
+
+### 実装
+- `bot\strategy\mm_funding.py`
+  - quote前に `max_position_notional` から許容残qtyを計算し、`size_bid` / `size_ask` を制約丸め後に削減。
+  - capで0になる場合は quote を抑制。
+  - `max_position_quote_reduce` / `max_position_quote_block` をdecision logに追加。
+  - `pre_quote_decision` に `max_position_quote_reduced`, `max_position_quote_block`, `size_bid_before_max_position_cap`, `size_ask_before_max_position_cap` を追加。
+- `tests\test_phase_d_strategy.py`
+  - max position到達前にquote sizeを削減し、`flatten` を呼ばないテストを追加。
+
+### 検証
+- `.venv\Scripts\python.exe -m py_compile bot\strategy\mm_funding.py tests\test_phase_d_strategy.py`: pass。
+- `.venv\Scripts\python.exe -m pytest -q tests\test_phase_d_strategy.py`: `5 passed`。
+- `config.yaml` 差分なし。
+
+### 未確定点
+- 修正後の `SKYAIUSDT wide18` live bounded再確認は未実施。
+- bounded短時間ではshutdown flattenが入るため、収益性評価は継続運用と分けて見る必要がある。
