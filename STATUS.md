@@ -3584,3 +3584,68 @@ ec1b00a  chore: bulk update after lint & format
 
 ### 未確定点
 - DRY 15分では fills 0。次は `SKYAIUSDT` の dry 60分または少額live boundedの前に、板厚/最小注文/制約を確認する。
+
+---
+
+## 2026-06-04 SKYAIUSDT P0/P1/P2 dry比較
+
+### 観測事実
+- `SKYAIUSDT` の制約を Bitget public/read-only で確認。
+  - spot `min_qty=0.01`, `qty_step=0.01`, `min_notional=1.0`, `tick_size=0.00001`
+  - perp `min_qty=1.0`, `qty_step=1.0`, `min_notional=5.0`, `tick_size=0.00001`
+- public scan は引き続き `SKYAIUSDT` ask-pass。
+  - `BASE_HALF_SPREAD_BPS=22`
+  - `ask_side_edge_bps=22.27599291089232`
+  - `bid_side_edge_bps=-21.88420930299933`
+  - `mid_basis_bps=22.08082744995447`
+- `SKYAIUSDT` wide22 DRY bounded 60分を実行。
+  - log: `runtime_logs\dry_symbol_SKYAIUSDT_wide22_side_edge_guard_60min_20260604_170401`
+  - `HALTED=0`
+  - `order_reject=0`
+  - `fill_parse_warning=0`
+  - `shutdown_cancel_all_done=1`
+  - `shutdown_cancel_all_failed=0`
+  - `book_rx_rate=59`
+  - `fill_monitor_heartbeat=60`
+  - `positions_monitor_heartbeat=58`
+  - `order_new=2709`
+  - `order_cancel=2709`
+  - `QUOTE_ASK=5418`
+  - fills `0`
+  - `ask_side_edge_bps`: p10 `3.6333426215827043`, p50 `10.513847610086868`, p90 `17.56728623056423`
+  - ask quote distance from micro: p10 `20.17043613505478`, p50 `21.696268356213828`, p90 `22.479355523754197`
+  - quote lifetime: p10 `0.49535679817199707`, p50 `0.5130319595336914`, p90 `1.5149390697479248`
+  - cancel reasons: `quote=1367`, `quote_fade=1340`, `cancel_aggressive=1`, `shutdown_cancel_all=1`
+- `SKYAIUSDT` wide18 DRY bounded 15分を実行。
+  - log: `runtime_logs\dry_symbol_SKYAIUSDT_wide18_side_edge_guard_15min_20260604_180532`
+  - `HALTED=0`
+  - `order_reject=0`
+  - `fill_parse_warning=0`
+  - `shutdown_cancel_all_done=1`
+  - `shutdown_cancel_all_failed=0`
+  - `book_rx_rate=14`
+  - `fill_monitor_heartbeat=15`
+  - `positions_monitor_heartbeat=15`
+  - `order_new=696`
+  - `order_cancel=696`
+  - fills `0`
+  - `ask_side_edge_bps`: p10 `7.618104812150092`, p50 `12.721665185547733`, p90 `19.656667976006737`
+  - ask quote distance from micro: p10 `15.96187220714424`, p50 `16.99366106512176`, p90 `18.20453456071926`
+  - quote lifetime: p10 `0.4958460330963135`, p50 `0.5178606510162354`, p90 `1.5307350158691406`
+  - cancel reasons: `quote=380`, `quote_fade=315`, `shutdown_cancel_all=1`
+- `git diff -- config.yaml`: 差分なし。
+
+### 推論
+- `SKYAIUSDT` は制約上、現行 `target_notional=50` でperp最小注文を満たす。
+- wide22はquoteがmicroから約 `21.7bps` 外側で、DRYの観測上は約定期待が低い。
+- wide18はquote距離がmicro p50 `16.99bps` まで近づき、ask edge p50も `12.72bps` 残るため、wide22より次の検証候補として強い。
+- DRYでは実fillが発生しないため、収益性はlive boundedでしか確定できない。
+
+### 検証
+- Bitget public RESTのみ使用。注文・キャンセル・決済・live起動なし。
+- `.venv\Scripts\python.exe scripts\analyze_live_profitability.py` と手動集計で確認。
+- `config.yaml` 差分なし。
+
+### 未確定点
+- wide18の実fill頻度、post-only reject有無、HEDGE/UNWIND/FLATTEN実約定パス。
+- 次に進めるなら `SKYAIUSDT` wide18 の live bounded 15分が最小の実約定確認。
