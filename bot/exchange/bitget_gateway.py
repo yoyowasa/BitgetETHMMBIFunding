@@ -18,9 +18,9 @@ from .constraints import (
     InstrumentConstraints,
     format_price_for_bitget,
     format_size_for_bitget,
-    quantize_price_floor,
     quantize_perp_price,
     quantize_size_floor,
+    quantize_spot_price,
 )
 
 
@@ -329,7 +329,7 @@ class BitgetGateway:
             rounded_price = None
             rounded_size = None
             if req.price is not None and constraints is not None and constraints.is_ready():
-                rounded_price = quantize_price_floor(req.price, constraints)
+                rounded_price = quantize_spot_price(req.price, req.side, constraints)
             if constraints is not None and constraints.is_ready():
                 rounded_size = quantize_size_floor(req.size, constraints)
             data = {

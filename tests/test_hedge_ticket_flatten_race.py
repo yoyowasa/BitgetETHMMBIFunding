@@ -1058,6 +1058,45 @@ def test_spot_hedge_price_payload_uses_decimal_tick_format() -> None:
         if record.get("event") == "order_new" and record.get("intent") == "HEDGE"
     ]
     assert order_new
+    assert order_new[-1]["price"] == 2105.25
+    assert order_new[-1]["price_payload"] == "2105.25"
+
+
+def test_spot_sell_price_payload_rounds_down_for_aggressive_ioc() -> None:
+    gateway = OMSGateway()
+    orders_logger = CapturingLogger()
+    oms = OMS(
+        gateway,
+        _config(),
+        risk=None,
+        orders_logger=orders_logger,
+        fills_logger=CapturingLogger(),
+    )
+
+    asyncio.run(
+        oms._submit_order(
+            OrderRequest(
+                inst_type=InstType.SPOT,
+                symbol="ETHUSDT",
+                side=Side.SELL,
+                order_type=OrderType.LIMIT,
+                size=0.02,
+                force=Force.IOC,
+                client_oid="FLATTEN-price-format",
+                intent=OrderIntent.FLATTEN,
+                cycle_id=1,
+                price=2105.2431399999996,
+            ),
+            reason="flatten",
+        )
+    )
+
+    order_new = [
+        record
+        for record in orders_logger.records
+        if record.get("event") == "order_new" and record.get("intent") == "FLATTEN"
+    ]
+    assert order_new
     assert order_new[-1]["price"] == 2105.24
     assert order_new[-1]["price_payload"] == "2105.24"
 
@@ -1093,6 +1132,47 @@ def test_gateway_spot_order_payload_uses_decimal_tick_format() -> None:
                 force=Force.IOC,
                 client_oid="HEDGE-gateway-price-format",
                 intent=OrderIntent.HEDGE,
+                cycle_id=1,
+                price=2105.2431399999996,
+            )
+        )
+    )
+
+    assert captured["path"] == "/api/v2/spot/trade/place-order"
+    assert captured["data"]["price"] == "2105.25"
+
+
+def test_gateway_spot_sell_order_payload_rounds_down() -> None:
+    gateway = BitgetGateway.__new__(BitgetGateway)
+    gateway.constraints = ConstraintsRegistry(
+        spot=InstrumentConstraints(
+            min_qty=0.0001,
+            qty_step=0.0001,
+            min_notional=0.0,
+            tick_size=0.01,
+            price_place=2,
+        )
+    )
+    captured: dict = {}
+
+    async def fake_rest_post(path: str, data: dict) -> dict:
+        captured["path"] = path
+        captured["data"] = data
+        return {"code": "00000", "data": {"orderId": "order-1"}}
+
+    gateway.rest_post = fake_rest_post
+
+    asyncio.run(
+        gateway.place_order(
+            OrderRequest(
+                inst_type=InstType.SPOT,
+                symbol="ETHUSDT",
+                side=Side.SELL,
+                order_type=OrderType.LIMIT,
+                size=0.02,
+                force=Force.IOC,
+                client_oid="FLATTEN-gateway-price-format",
+                intent=OrderIntent.FLATTEN,
                 cycle_id=1,
                 price=2105.2431399999996,
             )

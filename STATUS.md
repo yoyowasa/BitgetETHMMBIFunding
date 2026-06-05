@@ -3891,3 +3891,76 @@ ec1b00a  chore: bulk update after lint & format
 ### 未確定点
 - shutdown fill drain修正後の live bounded 再確認は未実施。
 - 収益化判断には shutdown flatten fill 捕捉後の実損益再測定と、保有/exit方針の再設計が必要。
+
+---
+
+## 2026-06-05 shutdown fill drain確認とSPOT BUY IOC丸め修正
+
+### 観測事実
+- commit `2928d13 fix: keep fill monitor alive during shutdown flatten` 後に bounded live を実行。
+- `SKYAIUSDT wide18` log: `runtime_logs\live_symbol_SKYAIUSDT_wide18_shutdown_fill_drain_15min_20260605_081030`
+  - `order_reject=0`
+  - `fill_parse_warning=0`
+  - `shutdown_cancel_all_done=1`
+  - `shutdown_flatten_positions_done=1`
+  - `shutdown_fill_drain_done=2`
+  - fill `0`
+  - 終了後read-only: open orders `0`, futures position `0.0`, spot dust `0.004`
+- `SKYAIUSDT wide14` log: `runtime_logs\live_symbol_SKYAIUSDT_wide14_shutdown_fill_drain_probe_15min_20260605_082800`
+  - `order_reject=0`
+  - `fill_parse_warning=0`
+  - `shutdown_cancel_all_done=1`
+  - `shutdown_flatten_positions_done=1`
+  - `shutdown_fill_drain_done=2`
+  - fill `0`
+  - `edge_negative_total=1112` で注文0
+  - 終了後read-only: open orders `0`, futures position `0.0`, spot dust `0.004`
+- public ticker scan:
+  - 初期spot在庫なしでは BID優位銘柄は `spot_hedge_sell_available_block` 対象。
+  - ASK優位かつ流動性高めの候補として `SAHARAUSDT` を選択。
+- `SAHARAUSDT wide18` log: `runtime_logs\live_symbol_SAHARAUSDT_wide18_shutdown_fill_drain_probe_15min_20260605_084430`
+  - 起動前read-only: open orders `0`, futures position `0.0`, spot available `0.0`
+  - `order_reject=0`
+  - `fill_parse_warning=0`
+  - `resp_code 22002=0`
+  - `shutdown_cancel_all_done=1`
+  - `shutdown_flatten_positions_done=1`
+  - `shutdown_fill_drain_done=2`
+  - fills `2`
+  - `USDT-FUTURES:QUOTE_ASK` sell qty `1800`, price `0.03338`, fee `-0.00841176`
+  - `USDT-FUTURES:FLATTEN` buy qty `1800`, price `0.03335`, fee `-0.0252126`
+  - `SPOT:HEDGE` fill は出ていない。
+  - 終了後read-only: open orders `0`, futures position `0.0`, spot available `0.0`
+- 該当HEDGE注文:
+  - `price_before_round=0.03323661`
+  - `price_after_round=0.03323`
+  - `side=buy`
+  - `force=ioc`
+  - `resp_code=00000`
+  - fillなし、後続で `hedge_pending_expired`。
+
+### 推論
+- `SAHARAUSDT` は約定発生率は改善したが、spot hedge が未成立。
+- 主因候補は SPOT BUY IOC の価格丸め。買いヘッジの aggressive price を floor しており、tick丸めで板下に落ちる。
+- SPOT SELL IOC は floor が aggressive 方向なので維持。SPOT BUY IOC は ceil が必要。
+
+### 実装
+- `bot\exchange\constraints.py`
+  - `quantize_spot_price(price, side, constraints)` を追加。
+  - SPOT BUY は `ROUND_CEILING`、SPOT SELL は `ROUND_FLOOR`。
+- `bot\oms\oms.py`
+  - SPOT注文価格丸めを `quantize_spot_price()` に変更。
+- `bot\exchange\bitget_gateway.py`
+  - gateway側のSPOT payload丸めも `quantize_spot_price()` に変更。
+- `tests\test_hedge_ticket_flatten_race.py`
+  - OMS / gateway の SPOT BUY は `2105.25` へ上丸め。
+  - OMS / gateway の SPOT SELL は `2105.24` へ下丸め。
+
+### 検証
+- `.venv\Scripts\python.exe -m py_compile bot\exchange\constraints.py bot\exchange\bitget_gateway.py bot\oms\oms.py tests\test_hedge_ticket_flatten_race.py`: pass。
+- `.venv\Scripts\python.exe -m pytest -q tests\test_hedge_ticket_flatten_race.py tests\test_perp_price_rounding.py`: `31 passed`。
+- `config.yaml` 差分なし。
+
+### 未確定点
+- SPOT BUY IOC丸め修正後の live bounded 再確認は未実施。
+- `SAHARAUSDT` の実 `QUOTE_ASK -> SPOT:HEDGE` 成立確認が次のP0。

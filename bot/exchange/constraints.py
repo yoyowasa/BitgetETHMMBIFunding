@@ -89,6 +89,20 @@ def quantize_price_floor(
     return units * tick
 
 
+def quantize_spot_price(
+    price: float | Decimal | str,
+    side: Side,
+    constraints: InstrumentConstraints,
+) -> Decimal:
+    tick = get_price_tick(constraints)
+    if tick <= 0:
+        return Decimal(str(price))
+    raw = Decimal(str(price))
+    rounding = ROUND_CEILING if side == Side.BUY else ROUND_FLOOR
+    units = (raw / tick).to_integral_value(rounding=rounding)
+    return units * tick
+
+
 def format_price_for_bitget(price: Decimal) -> str:
     # 役割: Decimal を Bitget REST payload 用の文字列に変換する関数
     return format(price.normalize(), "f")

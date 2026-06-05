@@ -14,8 +14,8 @@ from ..exchange.constraints import (
     InstrumentConstraints,
     format_price_for_bitget,
     get_price_tick,
-    quantize_price_floor,
     quantize_perp_price,
+    quantize_spot_price,
 )
 from ..log.jsonl import JsonlLogger
 from ..log.pnl_logger import PnLAggregator, QuoteMetrics
@@ -1464,7 +1464,7 @@ class OMS:
                 price_payload = format_price_for_bitget(rounded)
                 req.price = float(rounded)
             else:
-                rounded = quantize_price_floor(req.price, constraints)
+                rounded = quantize_spot_price(req.price, req.side, constraints)
                 price_tick = format_price_for_bitget(get_price_tick(constraints))
                 price_payload = format_price_for_bitget(rounded)
                 req.price = float(rounded)
