@@ -4015,3 +4015,53 @@ ec1b00a  chore: bulk update after lint & format
 - funding時刻を跨ぐ実測は未実施。
 - shutdown flattenを除外したrealized carry成績は未確定。
 - 常駐/24hへ進むには、exit条件またはfunding-window評価条件の明確化が必要。
+
+---
+
+## 2026-06-05 carry exit条件 P0 実装
+
+### 観測事実
+- `SAHARAUSDT wide18` 直近liveでは `QUOTE_ASK -> SPOT:HEDGE` は成立したが、約9分保有後の `FLATTEN` でentry粗利を上回る損失が出た。
+- entry:
+  - `QUOTE_ASK` sell `1806 @ 0.03327`
+  - `SPOT:HEDGE` buy `1806 @ 0.03319`
+  - entry gross `+0.14448 USDT`
+- exit:
+  - `USDT-FUTURES:FLATTEN` buy `1806 @ 0.03322`
+  - `SPOT:FLATTEN` sell `1804.19 @ 0.03308`
+  - exit gross `-0.3127148 USDT`
+
+### 推論
+- P0はentry条件ではなく、hedged carry positionのexit条件。
+- funding window外でentry粗利が侵食された場合、shutdownまで持たずにflattenする必要がある。
+
+### 実装
+- `bot\oms\oms.py`
+  - `CarryEntrySnapshot` を追加。
+  - hedge `ticket_done` 時に `entry_spread_pnl_usdt`, `carry_entry_gross_pnl_usdt`, `carry_entry_qty`, `carry_entry_ts` を記録。
+  - flat後の次hedgeで古いcarry集計が混ざらないよう、反対建てpositionがない場合は `carry_entry_cleared` でクリア。
+- `bot\strategy\mm_funding.py`
+  - `carry_exit_enabled` 時のみ、hedged positionの即時flatten想定損益を評価。
+  - `entry_gross + current_exit_gross - estimated_exit_fee` が `carry_exit_max_loss_bps` を下回ると `carry_exit_loss_cut`。
+  - funding window外で `carry_exit_min_net_bps` 以上なら `carry_exit_take_profit_outside_funding_window`。
+  - funding window外で `carry_exit_min_net_bps` 以下なら `carry_exit_profit_eroded`。
+  - trigger時は quote より前に `cancel_all` して `flatten`。
+- `bot\config.py`
+  - env制御のみ追加。`config.yaml` は変更しない。
+  - `CARRY_EXIT_ENABLED`
+  - `CARRY_EXIT_MIN_NET_BPS`
+  - `CARRY_EXIT_MAX_LOSS_BPS`
+  - `CARRY_EXIT_MIN_HOLD_SEC`
+  - `CARRY_EXIT_HOLD_FUNDING_WINDOW`
+- `tests\test_phase_d_strategy.py`
+  - SAHARA実例に近い価格で `carry_exit_loss_cut` が quote より前にflattenするテストを追加。
+
+### 検証
+- `.venv\Scripts\python.exe -m py_compile bot\config.py bot\oms\oms.py bot\strategy\mm_funding.py tests\test_phase_d_strategy.py`: pass。
+- `.venv\Scripts\python.exe -m pytest -q tests\test_phase_d_strategy.py tests\test_hedge_ticket_flatten_race.py`: `31 passed`。
+- `.venv\Scripts\python.exe -m pytest -q`: `132 passed`。
+- `config.yaml` 差分なし。
+
+### 未確定点
+- `CARRY_EXIT_ENABLED=1` の live bounded 再確認は未実施。
+- funding windowを跨いだhold挙動は未確認。

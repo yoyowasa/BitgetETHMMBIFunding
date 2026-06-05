@@ -75,6 +75,13 @@ class HedgeTicketSnapshot:
     expired: bool
 
 
+@dataclass(frozen=True)
+class CarryEntrySnapshot:
+    entry_gross_pnl_usdt: float
+    entry_qty: float
+    entry_ts: float | None
+
+
 class LRUSet:
     def __init__(self, maxlen: int = 10000):
         self._maxlen = maxlen
@@ -158,6 +165,9 @@ class OMS:
         self._unwind_pending_until = 0.0
         self._spot_available_quote_cache_ts = 0.0
         self._spot_available_quote_cache_value: float | None = None
+        self._carry_entry_gross_pnl_usdt = 0.0
+        self._carry_entry_qty = 0.0
+        self._carry_entry_ts: float | None = None
 
     @property
     def positions(self) -> PositionTracker:
@@ -247,6 +257,51 @@ class OMS:
         now_ts = time.time() if now is None else now
         return now_ts - self._last_hedge_ticket_done_ts < window_sec
 
+    def carry_entry_snapshot(self) -> CarryEntrySnapshot | None:
+        if self._carry_entry_qty <= 1e-9:
+            return None
+        if self._carry_entry_ts is None:
+            return None
+        if self._positions.spot_pos == 0 or self._positions.perp_pos == 0:
+            return None
+        if self._positions.spot_pos * self._positions.perp_pos >= 0:
+            return None
+        return CarryEntrySnapshot(
+            entry_gross_pnl_usdt=self._carry_entry_gross_pnl_usdt,
+            entry_qty=self._carry_entry_qty,
+            entry_ts=self._carry_entry_ts,
+        )
+
+    def clear_carry_entry(self, reason: str) -> None:
+        if self._carry_entry_qty <= 1e-9 and abs(self._carry_entry_gross_pnl_usdt) <= 1e-12:
+            return
+        self._orders_logger.log(
+            {
+                "ts": time.time(),
+                "event": "state",
+                "intent": "SYSTEM",
+                "source": "oms",
+                "mode": "RUN",
+                "reason": "carry_entry_cleared",
+                "leg": "positions",
+                "trigger_reason": reason,
+                "entry_gross_pnl_usdt": self._carry_entry_gross_pnl_usdt,
+                "entry_qty": self._carry_entry_qty,
+                "entry_ts": self._carry_entry_ts,
+            }
+        )
+        self._carry_entry_gross_pnl_usdt = 0.0
+        self._carry_entry_qty = 0.0
+        self._carry_entry_ts = None
+
+    def _clear_carry_entry_if_no_opposite_position(self, reason: str) -> None:
+        if self._carry_entry_qty <= 1e-9:
+            return
+        if self._positions.spot_pos * self._positions.perp_pos < 0:
+            if min(abs(self._positions.spot_pos), abs(self._positions.perp_pos)) > 1e-9:
+                return
+        self.clear_carry_entry(reason)
+
     def clear_unhedged_if_flat_dust(
         self,
         *,
@@ -275,6 +330,7 @@ class OMS:
         before = self._unhedged_qty
         self._unhedged_qty = 0.0
         self._unhedged_since = None
+        self.clear_carry_entry(reason)
         self._orders_logger.log(
             {
                 "ts": time.time(),
@@ -998,6 +1054,7 @@ class OMS:
 
     def _open_hedge_ticket(self, event: ExecutionEvent, hedge_side: Side, reason: str) -> HedgeTicket:
         now = time.time()
+        self._clear_carry_entry_if_no_opposite_position("new_hedge_ticket")
         ticket_id = self._new_client_oid(OrderIntent.HEDGE, int(now * 1000))
         ticket = HedgeTicket(
             ticket_id=ticket_id,
@@ -1220,9 +1277,13 @@ class OMS:
         if ticket.remain <= 1e-9:
             ticket.status = "DONE"
             self._last_hedge_ticket_done_ts = time.time()
+            perp_signed = ticket.want_qty if ticket.side == Side.SELL else -ticket.want_qty
+            spread_pnl = (event.price - ticket.perp_fill_price) * perp_signed
+            self._carry_entry_gross_pnl_usdt += spread_pnl
+            self._carry_entry_qty += ticket.want_qty
+            if self._carry_entry_ts is None:
+                self._carry_entry_ts = self._last_hedge_ticket_done_ts
             if self._pnl is not None:
-                perp_signed = ticket.want_qty if ticket.side == Side.SELL else -ticket.want_qty
-                spread_pnl = (event.price - ticket.perp_fill_price) * perp_signed
                 self._pnl.record_gross_spread(spread_pnl)
             self._orders_logger.log(
                 {
@@ -1238,6 +1299,10 @@ class OMS:
                     "filled_qty": ticket.filled_qty,
                     "remain": ticket.remain,
                     "pending_qty": ticket.pending_qty,
+                    "entry_spread_pnl_usdt": spread_pnl,
+                    "carry_entry_gross_pnl_usdt": self._carry_entry_gross_pnl_usdt,
+                    "carry_entry_qty": self._carry_entry_qty,
+                    "carry_entry_ts": self._carry_entry_ts,
                 }
             )
             self._cleanup_ticket(ticket_id)

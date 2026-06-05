@@ -763,6 +763,19 @@ class MMFundingStrategy:
             )
             return
 
+        if await self._maybe_exit_carry_position(
+            now=now,
+            spot_bbo=spot_bbo,
+            perp_bbo=perp_bbo,
+            funding_rate=funding.funding_rate,
+            basis=basis,
+            obi_spot=obi_spot,
+            obi_perp=obi_perp,
+            target_q=target_q,
+            tfi=tfi,
+        ):
+            return
+
         alpha_px = micro_price * (self._config.strategy.alpha_obi_bps / 10000.0) * obi_perp
         tfi_px = micro_price * (self._config.strategy.k_tfi_bps / 10000.0) * tfi
         inv_ratio = 0.0 if target_q == 0 else (perp_pos - target_perp) / target_q
@@ -1871,6 +1884,125 @@ class MMFundingStrategy:
         if self._in_funding_window(now):
             return base_target
         return base_target * 0.5
+
+    async def _maybe_exit_carry_position(
+        self,
+        *,
+        now: float,
+        spot_bbo: book_md.BBO,
+        perp_bbo: book_md.BBO,
+        funding_rate: float,
+        basis: float,
+        obi_spot: float,
+        obi_perp: float,
+        target_q: float,
+        tfi: float,
+    ) -> bool:
+        cfg = self._config.strategy
+        if not cfg.carry_exit_enabled:
+            return False
+        snapshot_getter = getattr(self._oms, "carry_entry_snapshot", None)
+        if not callable(snapshot_getter):
+            return False
+        snapshot = snapshot_getter()
+        if snapshot is None:
+            return False
+        spot_pos = self._oms.positions.spot_pos
+        perp_pos = self._oms.positions.perp_pos
+        if spot_pos * perp_pos >= 0:
+            return False
+        qty = min(abs(spot_pos), abs(perp_pos), snapshot.entry_qty)
+        if qty <= 1e-9:
+            return False
+        if snapshot.entry_ts is None:
+            return False
+        age_sec = max(0.0, now - snapshot.entry_ts)
+        if age_sec < cfg.carry_exit_min_hold_sec:
+            return False
+
+        if spot_pos > 0 and perp_pos < 0:
+            spot_exit_notional = spot_bbo.bid * qty
+            perp_exit_notional = perp_bbo.ask * qty
+            exit_gross_pnl_usdt = spot_exit_notional - perp_exit_notional
+            exit_side = "long_spot_short_perp"
+        elif spot_pos < 0 and perp_pos > 0:
+            spot_exit_notional = spot_bbo.ask * qty
+            perp_exit_notional = perp_bbo.bid * qty
+            exit_gross_pnl_usdt = perp_exit_notional - spot_exit_notional
+            exit_side = "short_spot_long_perp"
+        else:
+            return False
+
+        exit_fee_usdt_est = (
+            abs(perp_exit_notional) * self._config.cost.fee_maker_perp_bps / 10000.0
+            + abs(spot_exit_notional) * self._config.cost.fee_taker_spot_bps / 10000.0
+        )
+        total_est_net_usdt = (
+            snapshot.entry_gross_pnl_usdt + exit_gross_pnl_usdt - exit_fee_usdt_est
+        )
+        notional = max(abs(spot_exit_notional), abs(perp_exit_notional), 1e-12)
+        total_est_net_bps = total_est_net_usdt / notional * 10000.0
+        loss_cut = total_est_net_bps <= -abs(cfg.carry_exit_max_loss_bps)
+        in_funding_window = self._in_funding_window(now)
+        outside_window = not in_funding_window or not cfg.carry_exit_hold_funding_window
+        take_profit = outside_window and total_est_net_bps >= cfg.carry_exit_min_net_bps
+        profit_eroded = outside_window and total_est_net_bps <= cfg.carry_exit_min_net_bps
+        if loss_cut:
+            reason = "carry_exit_loss_cut"
+        elif take_profit:
+            reason = "carry_exit_take_profit_outside_funding_window"
+        elif profit_eroded:
+            reason = "carry_exit_profit_eroded"
+        else:
+            return False
+
+        self._state = StrategyState.FLATTENING
+        await self._oms.cancel_all(reason=reason)
+        self._decision_logger.log(
+            {
+                "ts": now,
+                "event": "risk",
+                "intent": "FLATTEN",
+                "source": "strategy",
+                "mode": self._state.value,
+                "reason": reason,
+                "leg": "positions",
+                "cycle_id": self._cycle_id,
+                "action_taken": "flatten",
+                "exit_side": exit_side,
+                "qty": qty,
+                "age_sec": age_sec,
+                "entry_gross_pnl_usdt": snapshot.entry_gross_pnl_usdt,
+                "exit_gross_pnl_usdt": exit_gross_pnl_usdt,
+                "exit_fee_usdt_est": exit_fee_usdt_est,
+                "total_est_net_usdt": total_est_net_usdt,
+                "total_est_net_bps": total_est_net_bps,
+                "carry_exit_min_net_bps": cfg.carry_exit_min_net_bps,
+                "carry_exit_max_loss_bps": cfg.carry_exit_max_loss_bps,
+                "in_funding_window": in_funding_window,
+                "spot_pos": spot_pos,
+                "perp_pos": perp_pos,
+                "delta": spot_pos + perp_pos,
+                "spot_bid": spot_bbo.bid,
+                "spot_ask": spot_bbo.ask,
+                "perp_bid": perp_bbo.bid,
+                "perp_ask": perp_bbo.ask,
+            }
+        )
+        await self._oms.flatten(spot_bbo, self._cycle_id, reason=reason)
+        self._log_decision(
+            now,
+            spot_bbo,
+            perp_bbo,
+            funding_rate,
+            basis,
+            obi_spot,
+            obi_perp,
+            target_q,
+            reason,
+            tfi,
+        )
+        return True
 
     def _in_funding_window(self, now: float) -> bool:
         dt = datetime.fromtimestamp(now, tz=timezone.utc)

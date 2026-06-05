@@ -50,6 +50,7 @@ class DummyOMS:
         self.cancel_reasons: list[str] = []
         self.flatten_calls: list[dict] = []
         self.spot_available = spot_available
+        self.carry_snapshot = None
 
     async def process_hedge_tickets(self, spot_bbo) -> None:
         return None
@@ -70,6 +71,9 @@ class DummyOMS:
 
     async def spot_available_for_quote(self) -> float | None:
         return self.spot_available
+
+    def carry_entry_snapshot(self):
+        return self.carry_snapshot
 
 
 class DummyRisk:
@@ -271,3 +275,46 @@ def test_max_position_cap_reduces_quote_size_before_flatten(monkeypatch) -> None
     pre_quote = [r for r in logger.records if r.get("reason") == "pre_quote_decision"]
     assert pre_quote[-1]["max_position_quote_reduced"] is True
     assert pre_quote[-1]["size_ask_before_max_position_cap"] > oms.last_update_quotes["ask_size"]
+
+
+def test_carry_exit_loss_cut_flattens_before_quote(monkeypatch) -> None:
+    from bot.strategy import mm_funding as module
+
+    def snapshot_from_store(store, inst_type: InstType, symbol: str, levels: int, channel=None, return_meta=False):
+        if inst_type == InstType.USDT_FUTURES:
+            snapshot = SimpleNamespace(bids=[(0.03320, 10000.0)], asks=[(0.03322, 10000.0)], ts=time.time())
+        else:
+            snapshot = SimpleNamespace(bids=[(0.03308, 10000.0)], asks=[(0.03319, 10000.0)], ts=time.time())
+        return (snapshot, True) if return_meta else snapshot
+
+    monkeypatch.setattr(module.book_md, "snapshot_from_store", snapshot_from_store)
+    monkeypatch.setattr(module.book_md, "bbo_from_snapshot", lambda snapshot: SimpleNamespace(bid=snapshot.bids[0][0], ask=snapshot.asks[0][0], bid_size=snapshot.bids[0][1], ask_size=snapshot.asks[0][1], ts=snapshot.ts))
+    monkeypatch.setattr(module.book_md, "calc_mid", lambda bbo: (bbo.bid + bbo.ask) / 2.0)
+    monkeypatch.setattr(module.book_md, "calc_microprice", lambda bbo: (bbo.ask * bbo.bid_size + bbo.bid * bbo.ask_size) / (bbo.bid_size + bbo.ask_size))
+    monkeypatch.setattr(module.book_md, "calc_obi", lambda snapshot: 0.0)
+    monkeypatch.setattr(MMFundingStrategy, "_in_funding_window", lambda self, now: False)
+
+    config = _config()
+    config.strategy.carry_exit_enabled = True
+    config.strategy.carry_exit_max_loss_bps = 5.0
+    config.strategy.carry_exit_min_hold_sec = 0.0
+    oms = DummyOMS(spot_available=1804.19)
+    oms.positions.spot_pos = 1804.19
+    oms.positions.perp_pos = -1806.0
+    oms.carry_snapshot = SimpleNamespace(
+        entry_gross_pnl_usdt=0.14448,
+        entry_qty=1806.0,
+        entry_ts=time.time() - 10.0,
+    )
+    funding_cache = SimpleNamespace(last=FundingInfo(funding_rate=0.01, next_update_time=None, interval_sec=None, ts=time.time()))
+    logger = DummyLogger()
+    strategy = MMFundingStrategy(config, funding_cache, oms, DummyRisk(), logger)
+
+    import asyncio
+    asyncio.run(strategy.step())
+
+    assert oms.flatten_calls == [{"cycle_id": 1, "reason": "carry_exit_loss_cut"}]
+    assert oms.last_update_quotes is None
+    exits = [record for record in logger.records if record.get("reason") == "carry_exit_loss_cut"]
+    assert exits
+    assert exits[0]["total_est_net_bps"] <= -config.strategy.carry_exit_max_loss_bps

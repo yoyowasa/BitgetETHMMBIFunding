@@ -80,6 +80,11 @@ class StrategyConfig:
     funding_window_sec: float = 300.0
     min_half_spread_bps: float = 8.0
     delta_tolerance_notional: float = 0.2
+    carry_exit_enabled: bool = False
+    carry_exit_min_net_bps: float = 0.0
+    carry_exit_max_loss_bps: float = 5.0
+    carry_exit_min_hold_sec: float = 2.0
+    carry_exit_hold_funding_window: bool = True
     dry_run: bool = False
 
 
@@ -238,3 +243,23 @@ def apply_env_overrides(config: AppConfig) -> None:
     side_edge_min_bps = _env_float("SIDE_EDGE_MIN_BPS")
     if side_edge_min_bps is not None:
         config.strategy.side_edge_min_bps = side_edge_min_bps
+
+    carry_exit_enabled = _env_bool("CARRY_EXIT_ENABLED")
+    if carry_exit_enabled is not None:
+        config.strategy.carry_exit_enabled = carry_exit_enabled
+
+    carry_exit_min_net_bps = _env_float("CARRY_EXIT_MIN_NET_BPS")
+    if carry_exit_min_net_bps is not None:
+        config.strategy.carry_exit_min_net_bps = carry_exit_min_net_bps
+
+    carry_exit_max_loss_bps = _env_float("CARRY_EXIT_MAX_LOSS_BPS")
+    if carry_exit_max_loss_bps is not None:
+        config.strategy.carry_exit_max_loss_bps = carry_exit_max_loss_bps
+
+    carry_exit_min_hold_sec = _env_float("CARRY_EXIT_MIN_HOLD_SEC")
+    if carry_exit_min_hold_sec is not None:
+        config.strategy.carry_exit_min_hold_sec = carry_exit_min_hold_sec
+
+    carry_exit_hold_funding_window = _env_bool("CARRY_EXIT_HOLD_FUNDING_WINDOW")
+    if carry_exit_hold_funding_window is not None:
+        config.strategy.carry_exit_hold_funding_window = carry_exit_hold_funding_window
