@@ -4065,3 +4065,67 @@ ec1b00a  chore: bulk update after lint & format
 ### 未確定点
 - `CARRY_EXIT_ENABLED=1` の live bounded 再確認は未実施。
 - funding windowを跨いだhold挙動は未確認。
+
+---
+
+## 2026-06-05 SAHARAUSDT carry exit P1 bounded 15分
+
+### 観測事実
+- 対象log: `runtime_logs\live_symbol_SAHARAUSDT_wide18_carry_exit_15min_20260605_170451`
+- env:
+  - `DRY_RUN=0`
+  - `BOT_MODE=live`
+  - `SYMBOL=SAHARAUSDT`
+  - `BASE_HALF_SPREAD_BPS=18`
+  - `MIN_HALF_SPREAD_BPS=18`
+  - `SIDE_EDGE_GUARD=1`
+  - `CARRY_EXIT_ENABLED=1`
+  - `CARRY_EXIT_MAX_LOSS_BPS=5`
+  - `CARRY_EXIT_MIN_NET_BPS=0`
+  - `CARRY_EXIT_MIN_HOLD_SEC=2`
+  - `CARRY_EXIT_HOLD_FUNDING_WINDOW=1`
+- 起動前read-only:
+  - `SPOT open orders=0`
+  - `Futures open orders=0`
+  - `Futures SAHARAUSDT position=0.0`
+  - `SPOT SAHARA available=0.004`
+  - `SPOT SAHARA frozen=0.0`
+- bounded結果:
+  - `duration_sec=903.167`
+  - `startup_cancel_all_done=1`
+  - `startup_cancel_all_failed=0`
+  - `startup_open_spot_balance_detected=0`
+  - `order_reject=0`
+  - `fill_parse_warning=0`
+  - order response codeは `00000` のみ。
+  - `resp_code 22002=0`。文字列 `22002` は timestamp 部分の誤検出。
+  - `fill_count=0`
+  - `ticket_done=0`
+  - `carry_exit_loss_cut=0`
+  - `carry_exit_profit_eroded=0`
+  - `carry_exit_take_profit_outside_funding_window=0`
+  - `book_rx_rate=15`
+  - `fill_monitor_heartbeat=15`
+  - `positions_monitor_heartbeat=15`
+  - `positions_empty` は出力あり。
+  - `shutdown_fill_drain_done=2`
+  - `shutdown_flatten_positions_done=1`
+  - `shutdown_flatten_positions_failed=0`
+  - `shutdown_cancel_all_done=1`
+  - `shutdown_cancel_all_failed=0`
+- `HALTED` は shutdown signal 後の最終tickで、運転中のhaltではない。
+- 終了後read-only:
+  - `SPOT open orders=0`
+  - `Futures open orders=0`
+  - `Futures SAHARAUSDT position=0.0`
+  - `SPOT SAHARA available=0.004`
+  - `SPOT SAHARA frozen=0.0`
+
+### 推論
+- P1安全性は合格。注文reject、fill parse warning、残留注文、残留positionは出ていない。
+- 今回は約定なしのため、`QUOTE_ASK -> SPOT:HEDGE -> carry_exit/hold` の実約定パスは未検証。
+- `SIDE_EDGE_GUARD=1` と spot在庫dustにより BID側はブロックされ、ASK側のmaker fill待ちになっている。
+
+### 未確定点
+- `carry_exit_*` の live実発火は未確認。
+- P2銘柄比較は未実施。ASK edge強い銘柄だけを候補にする。
