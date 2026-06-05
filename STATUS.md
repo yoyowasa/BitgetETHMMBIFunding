@@ -3964,3 +3964,54 @@ ec1b00a  chore: bulk update after lint & format
 ### 未確定点
 - SPOT BUY IOC丸め修正後の live bounded 再確認は未実施。
 - `SAHARAUSDT` の実 `QUOTE_ASK -> SPOT:HEDGE` 成立確認が次のP0。
+
+---
+
+## 2026-06-05 SPOT BUY IOC丸め修正後 SAHARAUSDT live 15分確認
+
+### 観測事実
+- commit `ce8158e fix: round spot buy ioc hedge price up` 後に `SAHARAUSDT wide18` live bounded 15分を実行。
+- log: `runtime_logs\live_symbol_SAHARAUSDT_wide18_spot_buy_roundup_15min_20260605_090405`
+- 起動前read-only:
+  - `SPOT open orders=0`
+  - `Futures open orders=0`
+  - `Futures SAHARAUSDT position=0.0`
+  - `SPOT SAHARA available=0.0`
+  - `SPOT SAHARA frozen=0.0`
+- safety:
+  - `order_reject=0`
+  - `fill_parse_warning=0`
+  - `resp_code 22002=0`
+  - `shutdown_cancel_all_done=1`
+  - `shutdown_cancel_all_failed=0`
+  - `shutdown_flatten_positions_done=1`
+  - `shutdown_flatten_positions_failed=0`
+  - `shutdown_fill_drain_done=2`
+  - `hedge_pending_expired=0`
+  - `ticket_done=1`
+- fills:
+  - `USDT-FUTURES:QUOTE_ASK` sell qty `1806`, price `0.03327`, fee `-0.00841198 USDT`
+  - `SPOT:HEDGE` buy qty `1806`, price `0.03319`, fee `1.806 SAHARA`
+  - `USDT-FUTURES:FLATTEN` buy qty `1806`, price `0.03322`, fee `-0.02519803 USDT`
+  - `SPOT:FLATTEN` sell qty `1804.19`, price `0.03308`, fee `0.05968261 USDT`
+- rough:
+  - `QUOTE_ASK -> SPOT:HEDGE` gross `0.14448 USDT`
+  - known net `0.13606802 USDT`（spot feeはbase coin）
+  - `pnl_net_sum=-1.7987736634599671`
+- 終了後read-only:
+  - `SPOT open orders=0`
+  - `Futures open orders=0`
+  - `Futures SAHARAUSDT position=0.0`
+  - `SPOT SAHARA available=0.004`
+  - `SPOT SAHARA frozen=0.0`
+
+### 推論
+- SPOT BUY IOC 丸め修正は有効。実 `QUOTE_ASK -> SPOT:HEDGE` が成立した。
+- bounded 15分の収益性は不合格。entry後に hedged carry position を持ち、終了時 `FLATTEN` で spot 側を低値売却して粗利を消している。
+- この戦略は短時間boundedのshutdown flatten損益と、funding carryの本来評価を分ける必要がある。
+- 次の収益化P0は「保有してfundingを取りに行く条件」と「途中exit/flatten条件」を分離して評価すること。
+
+### 未確定点
+- funding時刻を跨ぐ実測は未実施。
+- shutdown flattenを除外したrealized carry成績は未確定。
+- 常駐/24hへ進むには、exit条件またはfunding-window評価条件の明確化が必要。
