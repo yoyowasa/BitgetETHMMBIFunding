@@ -4129,3 +4129,52 @@ ec1b00a  chore: bulk update after lint & format
 ### 未確定点
 - `carry_exit_*` の live実発火は未確認。
 - P2銘柄比較は未実施。ASK edge強い銘柄だけを候補にする。
+
+---
+
+## 2026-06-06 P2 銘柄比較 ASK edge
+
+### 観測事実
+- 目的: 初期spot在庫なしで動けるASK優位銘柄を抽出する。
+- `config.yaml` は変更なし。
+- `scripts\scan_side_edge_symbols.py` に以下を追加:
+  - `--side ask|bid|best`
+  - `--include-funding`
+  - `--require-positive-funding`
+- テスト追加: `tests\test_scan_side_edge_symbols.py`
+- 検証:
+  - `.venv\Scripts\python.exe -m py_compile scripts\scan_side_edge_symbols.py tests\test_scan_side_edge_symbols.py`: pass
+  - `.venv\Scripts\python.exe -m pytest -q tests\test_scan_side_edge_symbols.py`: `4 passed`
+  - `.venv\Scripts\python.exe -m pytest -q`: `134 passed`
+- read-only public scan:
+  - 条件: `BASE_HALF_SPREAD_BPS=18`, `SIDE_EDGE_MIN_BPS=0`, `--side ask`, `--include-funding`, `--require-positive-funding`
+  - `min_perp_quote_volume=100000` の上位:
+    - `AIOUSDT`: `ask_edge≈43.15bps`, `perp_quote_volume≈172k`, `funding≈0.50bps`
+    - `LUMIAUSDT`: `ask_edge≈31.07bps`, `perp_quote_volume≈228k`, `funding≈0.50bps`
+    - `DRIFTUSDT`: `ask_edge≈27.91bps`, `perp_quote_volume≈377k`, `funding≈0.50bps`
+    - `TAGUSDT`: `ask_edge≈27.50bps`, `perp_quote_volume≈1.27m`, `funding≈0.50bps`
+    - `ZBTUSDT`: `ask_edge≈26.88bps`, `perp_quote_volume≈1.04m`, `funding≈0.50bps`
+    - `BTWUSDT`: `ask_edge≈17.39bps`, `perp_quote_volume≈44.27m`, `funding≈0.87bps`
+    - `SAHARAUSDT`: `ask_edge≈17.31bps`, `perp_quote_volume≈9.76m`, `funding≈1.92bps`
+  - `min_perp_quote_volume=1000000` の上位:
+    - `ZBTUSDT`: `ask_edge≈26.91bps`, `perp_quote_volume≈1.04m`, `funding≈0.50bps`
+    - `TAGUSDT`: `ask_edge≈24.62bps`, `perp_quote_volume≈1.27m`, `funding≈0.50bps`
+    - `BTWUSDT`: `ask_edge≈22.43bps`, `perp_quote_volume≈44.44m`, `funding≈0.87bps`
+    - `SAHARAUSDT`: `ask_edge≈14.29bps`, `perp_quote_volume≈9.76m`, `funding≈1.92bps`
+    - `SKYAIUSDT`: `ask_edge≈13.32bps`, `perp_quote_volume≈3.85m`, `funding≈0.50bps`
+- `BTWUSDT` read-only:
+  - `SPOT open orders=0`
+  - `Futures open orders=0`
+  - `Futures BTWUSDT position=0.0`
+  - `SPOT BTW available=0.0`
+  - `SPOT BTW frozen=0.0`
+
+### 推論
+- BID優位銘柄は初期spot在庫なしでは除外する。
+- `AIOUSDT/LUMIAUSDT/DRIFTUSDT` はedgeが大きいが、perp流動性が薄く、初回live bounded候補としては優先度を下げる。
+- `BTWUSDT` はASK edge、perp流動性、正fundingのバランスが最も良い。
+- `SAHARAUSDT` はfundingと流動性は良いが、今回scanでは `BTWUSDT` よりASK edgeが弱い。
+
+### 未確定点
+- `BTWUSDT` の dry/bounded 実ログは未取得。
+- ticker scanは瞬間値。live fill後の `QUOTE_ASK -> SPOT:HEDGE -> carry_exit/hold` 成績は未確認。

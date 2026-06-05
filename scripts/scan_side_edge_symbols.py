@@ -18,6 +18,7 @@ from bot.config import apply_env_overrides, load_config
 
 SPOT_TICKERS_PATH = "/api/v2/spot/market/tickers"
 PERP_TICKERS_PATH = "/api/v2/mix/market/tickers"
+PERP_FUNDING_PATH = "/api/v2/mix/market/current-fund-rate"
 
 
 @dataclass(frozen=True)
@@ -159,6 +160,51 @@ def fetch_json(base_url: str, path: str, params: dict[str, str] | None = None, t
         return json.loads(response.read().decode("utf-8"))
 
 
+def filter_side_rows(rows: list[SideEdgeScanRow], side: str) -> list[SideEdgeScanRow]:
+    if side == "bid":
+        return [row for row in rows if row.bid_pass]
+    if side == "ask":
+        return [row for row in rows if row.ask_pass]
+    return rows
+
+
+def sort_side_rows(rows: list[SideEdgeScanRow], side: str) -> list[SideEdgeScanRow]:
+    if side == "bid":
+        return sorted(rows, key=lambda row: (row.bid_side_edge_bps, row.perp_quote_volume), reverse=True)
+    if side == "ask":
+        return sorted(rows, key=lambda row: (row.ask_side_edge_bps, row.perp_quote_volume), reverse=True)
+    return sorted(rows, key=lambda row: (row.best_side_edge_bps, row.perp_quote_volume), reverse=True)
+
+
+def funding_rate_from_payload(payload: dict[str, Any]) -> float | None:
+    rows = _rows(payload)
+    if not rows:
+        return None
+    rate = rows[0].get("fundingRate") or rows[0].get("funding_rate") or rows[0].get("rate")
+    if rate in (None, ""):
+        return None
+    try:
+        return float(rate)
+    except (TypeError, ValueError):
+        return None
+
+
+def fetch_funding_rate(
+    base_url: str,
+    *,
+    symbol: str,
+    product_type: str,
+    timeout_sec: float,
+) -> float | None:
+    payload = fetch_json(
+        base_url,
+        PERP_FUNDING_PATH,
+        params={"symbol": symbol, "productType": product_type},
+        timeout_sec=timeout_sec,
+    )
+    return funding_rate_from_payload(payload)
+
+
 def _symbol_list(raw: str | None) -> list[str] | None:
     if not raw:
         return None
@@ -174,6 +220,18 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=25)
     parser.add_argument("--min-perp-quote-volume", type=float, default=0.0)
     parser.add_argument("--max-abs-mid-basis-bps", type=float, default=200.0)
+    parser.add_argument(
+        "--side",
+        choices=("best", "bid", "ask"),
+        default="best",
+        help="Filter/sort by quote side. Use ask when starting with no spot inventory.",
+    )
+    parser.add_argument("--include-funding", action="store_true", help="Fetch current funding for displayed rows.")
+    parser.add_argument(
+        "--require-positive-funding",
+        action="store_true",
+        help="Keep only rows with funding rate >= strategy.min_funding_rate.",
+    )
     parser.add_argument("--timeout-sec", type=float, default=10.0)
     parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     args = parser.parse_args()
@@ -206,7 +264,33 @@ def main() -> int:
         min_perp_quote_volume=args.min_perp_quote_volume,
         max_abs_mid_basis_bps=args.max_abs_mid_basis_bps,
     )
+    rows = sort_side_rows(filter_side_rows(rows, args.side), args.side)
+    product_type = config.symbols.perp.productType or "USDT-FUTURES"
+    funding_by_symbol: dict[str, float | None] = {}
+    if args.include_funding or args.require_positive_funding:
+        for row in rows:
+            funding_by_symbol[row.symbol] = fetch_funding_rate(
+                config.exchange.base_url,
+                symbol=row.symbol,
+                product_type=product_type,
+                timeout_sec=args.timeout_sec,
+            )
+        if args.require_positive_funding:
+            rows = [
+                row
+                for row in rows
+                if funding_by_symbol.get(row.symbol) is not None
+                and funding_by_symbol[row.symbol] >= config.strategy.min_funding_rate
+            ]
     limited = rows[: max(args.limit, 0)]
+    output_rows = []
+    for row in limited:
+        output_row = asdict(row)
+        if args.include_funding or args.require_positive_funding:
+            funding_rate = funding_by_symbol.get(row.symbol)
+            output_row["funding_rate"] = funding_rate
+            output_row["funding_bps"] = funding_rate * 10000.0 if funding_rate is not None else None
+        output_rows.append(output_row)
     output = {
         "config_path": str(Path(args.config)),
         "half_spread_bps": config.strategy.base_half_spread_bps,
@@ -216,16 +300,25 @@ def main() -> int:
         "side_cost_bps": side_cost_bps,
         "min_side_edge_bps": config.strategy.side_edge_min_bps,
         "max_abs_mid_basis_bps": args.max_abs_mid_basis_bps,
+        "side": args.side,
+        "include_funding": args.include_funding,
+        "require_positive_funding": args.require_positive_funding,
         "candidate_count": len(rows),
-        "rows": [asdict(row) for row in limited],
+        "rows": output_rows,
     }
     if args.json:
         print(json.dumps(output, ensure_ascii=False, indent=2))
     else:
+        funding_header = " funding_bps" if args.include_funding or args.require_positive_funding else ""
         print(
             "symbol best bid_edge ask_edge mid_basis bid_pass ask_pass spot_bid spot_ask perp_bid perp_ask perp_quote_volume"
+            f"{funding_header}"
         )
         for row in limited:
+            funding_value = ""
+            if args.include_funding or args.require_positive_funding:
+                funding_rate = funding_by_symbol.get(row.symbol)
+                funding_value = f" {funding_rate * 10000.0:.4f}" if funding_rate is not None else " null"
             print(
                 f"{row.symbol} "
                 f"{row.best_side_edge_bps:.4f} "
@@ -239,6 +332,7 @@ def main() -> int:
                 f"{row.perp_bid:.10g} "
                 f"{row.perp_ask:.10g} "
                 f"{row.perp_quote_volume:.2f}"
+                f"{funding_value}"
             )
     return 0
 
