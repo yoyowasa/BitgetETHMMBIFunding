@@ -4178,3 +4178,64 @@ ec1b00a  chore: bulk update after lint & format
 ### 未確定点
 - `BTWUSDT` の dry/bounded 実ログは未取得。
 - ticker scanは瞬間値。live fill後の `QUOTE_ASK -> SPOT:HEDGE -> carry_exit/hold` 成績は未確認。
+
+---
+
+## 2026-06-08 BTWUSDT dry bounded 15分 / scan式修正
+
+### 観測事実
+- 対象log: `runtime_logs\dry_symbol_BTWUSDT_wide18_carry_exit_15min_20260608_003501`
+- 起動前read-only:
+  - `SPOT open orders=0`
+  - `Futures open orders=0`
+  - `Futures BTWUSDT position=0.0`
+  - `SPOT BTW available=0.0`
+  - `SPOT BTW frozen=0.0`
+- env:
+  - `DRY_RUN=1`
+  - `BOT_MODE=dry`
+  - `SYMBOL=BTWUSDT`
+  - `BASE_HALF_SPREAD_BPS=18`
+  - `MIN_HALF_SPREAD_BPS=18`
+  - `SIDE_EDGE_GUARD=1`
+  - `CARRY_EXIT_ENABLED=1`
+- dry bounded結果:
+  - `duration_sec=899.246`
+  - `HALTED=0`
+  - `order_reject=0`
+  - `fill_parse_warning=0`
+  - `startup_open_spot_balance_detected=0`
+  - `shutdown_cancel_all_done=1`
+  - `shutdown_cancel_all_failed=0`
+  - `positions_monitor_heartbeat=15`
+  - `fill_monitor_heartbeat=15`
+  - `positions_empty=15`
+  - `fill_count=0`
+  - `order_new=0`
+  - `side_edge_guard_block=1662`
+  - `spot_hedge_sell_available_block=1504`
+- 実戦略ログ分布:
+  - `ask_side_edge_bps mean=-37.37`, `p50=-40.15`, `max=-5.42`
+  - `bid_side_edge_bps mean=20.71`, `p50=23.65`, `max=57.95`
+  - `funding_bps mean=6.73`
+- `scripts\scan_side_edge_symbols.py` 修正:
+  - funding取得時に `funding_skew_bps_per_rate` を反映。
+  - 正funding時の `ask_funding_adjust_bps < 0` により、ASK quoteが内側へ寄る実戦略式に合わせた。
+- 修正後scan:
+  - 条件: `BASE_HALF_SPREAD_BPS=18`, `--side ask`, `--include-funding`, `--require-positive-funding`, `min_perp_quote_volume=1000000`
+  - 上位: `SAHARAUSDT`, `RAVEUSDT`, `BUSDT`, `JCTUSDT`, `SKYAIUSDT`
+  - `BTWUSDT` は上位から脱落。
+- 検証:
+  - `.venv\Scripts\python.exe -m py_compile scripts\scan_side_edge_symbols.py tests\test_scan_side_edge_symbols.py`: pass
+  - `.venv\Scripts\python.exe -m pytest -q tests\test_scan_side_edge_symbols.py`: `5 passed`
+  - `.venv\Scripts\python.exe -m pytest -q`: `135 passed`
+  - `config.yaml` 差分なし。
+
+### 推論
+- `BTWUSDT` は採用しない。理由は実戦略のfunding skew込みでASK edgeが負。
+- 旧scanは funding skew を無視しており、ASK候補を過大評価していた。
+- 次候補は `SAHARAUSDT`。流動性とASK edgeが現時点で最も良い。
+
+### 未確定点
+- 修正後scanに基づく `SAHARAUSDT` dry bounded は未実施。
+- `QUOTE_ASK -> SPOT:HEDGE -> carry_exit/hold` の実約定パスは未完了。

@@ -44,6 +44,10 @@ class SideEdgeScanRow:
     bid_side_edge_bps: float
     ask_side_edge_bps: float
     best_side_edge_bps: float
+    funding_rate: float | None
+    funding_skew_bps: float
+    bid_funding_adjust_bps: float
+    ask_funding_adjust_bps: float
     bid_pass: bool
     ask_pass: bool
     spot_quote_volume: float
@@ -105,6 +109,8 @@ def scan_side_edges(
     symbols: list[str] | None = None,
     min_perp_quote_volume: float = 0.0,
     max_abs_mid_basis_bps: float | None = None,
+    funding_rates: dict[str, float | None] | None = None,
+    funding_skew_bps_per_rate: float = 0.0,
 ) -> list[SideEdgeScanRow]:
     spot_tickers = ticker_map(spot_payload)
     perp_tickers = ticker_map(perp_payload)
@@ -124,8 +130,16 @@ def scan_side_edges(
         mid_basis_bps = (mid_perp - mid_spot) / mid_spot * 10000.0
         if max_abs_mid_basis_bps is not None and abs(mid_basis_bps) > max_abs_mid_basis_bps:
             continue
-        perp_quote_bid = mid_perp * (1.0 - half_spread_bps / 10000.0)
-        perp_quote_ask = mid_perp * (1.0 + half_spread_bps / 10000.0)
+        funding_rate = None if funding_rates is None else funding_rates.get(symbol)
+        funding_skew_bps = (funding_rate or 0.0) * funding_skew_bps_per_rate
+        if (funding_rate or 0.0) > 0:
+            bid_funding_adjust = max(0.0, funding_skew_bps)
+            ask_funding_adjust = -max(0.0, funding_skew_bps)
+        else:
+            bid_funding_adjust = min(0.0, funding_skew_bps)
+            ask_funding_adjust = -min(0.0, funding_skew_bps)
+        perp_quote_bid = mid_perp * (1.0 - (half_spread_bps + bid_funding_adjust) / 10000.0)
+        perp_quote_ask = mid_perp * (1.0 + (half_spread_bps + ask_funding_adjust) / 10000.0)
         bid_spot_hedge_px = spot.bid * (1.0 - hedge_aggressive_bps / 10000.0)
         ask_spot_hedge_px = spot.ask * (1.0 + hedge_aggressive_bps / 10000.0)
         bid_edge = (bid_spot_hedge_px - perp_quote_bid) / mid_spot * 10000.0 - side_cost_bps
@@ -145,6 +159,10 @@ def scan_side_edges(
                 bid_side_edge_bps=bid_edge,
                 ask_side_edge_bps=ask_edge,
                 best_side_edge_bps=max(bid_edge, ask_edge),
+                funding_rate=funding_rate,
+                funding_skew_bps=funding_skew_bps,
+                bid_funding_adjust_bps=bid_funding_adjust,
+                ask_funding_adjust_bps=ask_funding_adjust,
                 bid_pass=bid_edge >= min_side_edge_bps,
                 ask_pass=ask_edge >= min_side_edge_bps,
                 spot_quote_volume=spot.quote_volume,
@@ -251,7 +269,8 @@ def main() -> int:
         params={"productType": config.symbols.perp.productType or "USDT-FUTURES"},
         timeout_sec=args.timeout_sec,
     )
-    rows = scan_side_edges(
+    product_type = config.symbols.perp.productType or "USDT-FUTURES"
+    preliminary_rows = scan_side_edges(
         spot_payload,
         perp_payload,
         half_spread_bps=config.strategy.base_half_spread_bps,
@@ -264,17 +283,32 @@ def main() -> int:
         min_perp_quote_volume=args.min_perp_quote_volume,
         max_abs_mid_basis_bps=args.max_abs_mid_basis_bps,
     )
-    rows = sort_side_rows(filter_side_rows(rows, args.side), args.side)
-    product_type = config.symbols.perp.productType or "USDT-FUTURES"
     funding_by_symbol: dict[str, float | None] = {}
     if args.include_funding or args.require_positive_funding:
-        for row in rows:
+        for row in preliminary_rows:
             funding_by_symbol[row.symbol] = fetch_funding_rate(
                 config.exchange.base_url,
                 symbol=row.symbol,
                 product_type=product_type,
                 timeout_sec=args.timeout_sec,
             )
+    rows = scan_side_edges(
+        spot_payload,
+        perp_payload,
+        half_spread_bps=config.strategy.base_half_spread_bps,
+        hedge_aggressive_bps=(
+            config.hedge.hedge_aggressive_bps if config.hedge.use_spot_limit_ioc else 0.0
+        ),
+        side_cost_bps=side_cost_bps,
+        min_side_edge_bps=config.strategy.side_edge_min_bps,
+        symbols=_symbol_list(args.symbols),
+        min_perp_quote_volume=args.min_perp_quote_volume,
+        max_abs_mid_basis_bps=args.max_abs_mid_basis_bps,
+        funding_rates=funding_by_symbol if funding_by_symbol else None,
+        funding_skew_bps_per_rate=config.strategy.funding_skew_bps_per_rate,
+    )
+    rows = sort_side_rows(filter_side_rows(rows, args.side), args.side)
+    if args.include_funding or args.require_positive_funding:
         if args.require_positive_funding:
             rows = [
                 row
@@ -287,9 +321,9 @@ def main() -> int:
     for row in limited:
         output_row = asdict(row)
         if args.include_funding or args.require_positive_funding:
-            funding_rate = funding_by_symbol.get(row.symbol)
-            output_row["funding_rate"] = funding_rate
-            output_row["funding_bps"] = funding_rate * 10000.0 if funding_rate is not None else None
+            output_row["funding_bps"] = (
+                row.funding_rate * 10000.0 if row.funding_rate is not None else None
+            )
         output_rows.append(output_row)
     output = {
         "config_path": str(Path(args.config)),
@@ -298,6 +332,7 @@ def main() -> int:
             config.hedge.hedge_aggressive_bps if config.hedge.use_spot_limit_ioc else 0.0
         ),
         "side_cost_bps": side_cost_bps,
+        "funding_skew_bps_per_rate": config.strategy.funding_skew_bps_per_rate,
         "min_side_edge_bps": config.strategy.side_edge_min_bps,
         "max_abs_mid_basis_bps": args.max_abs_mid_basis_bps,
         "side": args.side,
@@ -317,8 +352,11 @@ def main() -> int:
         for row in limited:
             funding_value = ""
             if args.include_funding or args.require_positive_funding:
-                funding_rate = funding_by_symbol.get(row.symbol)
-                funding_value = f" {funding_rate * 10000.0:.4f}" if funding_rate is not None else " null"
+                funding_value = (
+                    f" {row.funding_rate * 10000.0:.4f}"
+                    if row.funding_rate is not None
+                    else " null"
+                )
             print(
                 f"{row.symbol} "
                 f"{row.best_side_edge_bps:.4f} "

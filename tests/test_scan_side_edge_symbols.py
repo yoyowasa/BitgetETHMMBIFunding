@@ -107,3 +107,40 @@ def test_funding_rate_from_payload_accepts_bitget_shape() -> None:
     payload = {"data": [{"symbol": "ASK1USDT", "fundingRate": "0.00005"}]}
 
     assert funding_rate_from_payload(payload) == 0.00005
+
+
+def test_scan_side_edges_applies_positive_funding_skew_to_ask_quote() -> None:
+    spot_payload = {
+        "data": [
+            {"symbol": "AAAUSDT", "bidPr": "100.0", "askPr": "100.2", "usdtVolume": "1000"}
+        ]
+    }
+    perp_payload = {
+        "data": [
+            {"symbol": "AAAUSDT", "bidPr": "100.4", "askPr": "100.6", "usdtVolume": "2000"}
+        ]
+    }
+
+    no_funding = scan_side_edges(
+        spot_payload,
+        perp_payload,
+        half_spread_bps=18.0,
+        hedge_aggressive_bps=5.0,
+        side_cost_bps=15.4,
+        min_side_edge_bps=0.0,
+    )[0]
+    with_funding = scan_side_edges(
+        spot_payload,
+        perp_payload,
+        half_spread_bps=18.0,
+        hedge_aggressive_bps=5.0,
+        side_cost_bps=15.4,
+        min_side_edge_bps=0.0,
+        funding_rates={"AAAUSDT": 0.001},
+        funding_skew_bps_per_rate=1000.0,
+    )[0]
+
+    assert with_funding.funding_skew_bps == 1.0
+    assert with_funding.ask_funding_adjust_bps == -1.0
+    assert with_funding.ask_side_edge_bps < no_funding.ask_side_edge_bps
+    assert with_funding.bid_side_edge_bps > no_funding.bid_side_edge_bps
