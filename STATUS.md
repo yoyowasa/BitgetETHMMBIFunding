@@ -4239,3 +4239,56 @@ ec1b00a  chore: bulk update after lint & format
 ### 未確定点
 - 修正後scanに基づく `SAHARAUSDT` dry bounded は未実施。
 - `QUOTE_ASK -> SPOT:HEDGE -> carry_exit/hold` の実約定パスは未完了。
+
+---
+
+## 2026-06-08 SAHARAUSDT dry bounded 15分
+
+### 観測事実
+- 対象log: `runtime_logs\dry_symbol_SAHARAUSDT_wide18_carry_exit_15min_20260608_005439`
+- 起動前read-only:
+  - `SPOT open orders=0`
+  - `Futures open orders=0`
+  - `Futures SAHARAUSDT position=0.0`
+  - `SPOT SAHARA available=0.004`
+  - `SPOT SAHARA frozen=0.0`
+- env:
+  - `DRY_RUN=1`
+  - `BOT_MODE=dry`
+  - `SYMBOL=SAHARAUSDT`
+  - `BASE_HALF_SPREAD_BPS=18`
+  - `MIN_HALF_SPREAD_BPS=18`
+  - `SIDE_EDGE_GUARD=1`
+  - `CARRY_EXIT_ENABLED=1`
+- dry bounded結果:
+  - `duration_sec=899.195`
+  - `HALTED=0`
+  - `order_reject=0`
+  - `fill_parse_warning=0`
+  - `startup_open_spot_balance_detected=0`
+  - `shutdown_cancel_all_done=1`
+  - `shutdown_cancel_all_failed=0`
+  - `positions_monitor_heartbeat=15`
+  - `fill_monitor_heartbeat=15`
+  - `positions_empty=15`
+  - `book_rx_rate=14`
+  - `order_new=386`
+  - `order_cancel=386`
+  - `order_skip=0`
+  - `QUOTE_ASK=772`
+  - `QUOTE_BID=0`
+  - `fill_count=0`
+- 実戦略ログ分布:
+  - `ask_side_edge_bps mean=40.70`, `p50=39.06`, `min=28.27`, `max=64.36`
+  - `bid_side_edge_bps mean=-49.61`, `p50=-47.55`
+  - `funding_bps mean=10.19`, `p50=8.80`, `max=15.27`
+  - `expected_edge_bps mean=17.39`, `p50=16.00`
+
+### 推論
+- `SAHARAUSDT` は dry 条件でASK片側quote候補として成立。
+- 初期spot在庫なしの前提に合う。BIDは除外され、ASKのみ仮想発注された。
+- 次は live bounded 15分で `QUOTE_ASK -> SPOT:HEDGE -> carry_exit/hold` を確認する段階。
+
+### 未確定点
+- live実約定は未確認。
+- carry exit実発火は未確認。
