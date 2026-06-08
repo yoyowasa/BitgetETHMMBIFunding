@@ -4292,3 +4292,77 @@ ec1b00a  chore: bulk update after lint & format
 ### 未確定点
 - live実約定は未確認。
 - carry exit実発火は未確認。
+
+---
+
+## 2026-06-08 SAHARAUSDT live bounded 15分 / carry exit funding-window修正
+
+### 観測事実
+- 対象log: `runtime_logs\live_symbol_SAHARAUSDT_wide18_carry_exit_15min_20260608_164620`
+- 起動前read-only:
+  - `SPOT open orders=0`
+  - `Futures open orders=0`
+  - `Futures SAHARAUSDT position=0.0`
+  - `SPOT SAHARA available=0.004`
+  - `SPOT SAHARA frozen=0.0`
+- bounded結果:
+  - `duration_sec=903.079`
+  - `order_reject=0`
+  - `fill_parse_warning=0`
+  - `shutdown_cancel_all_done=1`
+  - `shutdown_cancel_all_failed=0`
+  - `shutdown_flatten_positions_done=1`
+  - `shutdown_flatten_positions_failed=0`
+  - `shutdown_fill_drain_done=2`
+  - `positions_monitor_heartbeat=15`
+  - `fill_monitor_heartbeat=15`
+  - `book_rx_rate=15`
+  - `resp_code 22002=0`
+  - `resp_code 43001=1`: fill済みquote cancelのため。`order_reject` ではない。
+- fill:
+  - `USDT-FUTURES:QUOTE_ASK` sell `1636 @ 0.03671`, fee `-0.00840805 USDT`
+  - `SPOT:HEDGE` buy `1636 @ 0.03659`, fee `1.636 SAHARA`
+  - `ticket_done`: `entry_spread_pnl_usdt=0.19632`
+  - `carry_exit_loss_cut` が約4.5秒後に発火。
+  - `USDT-FUTURES:FLATTEN` buy `1636 @ 0.03667`, fee `-0.02519669 USDT`
+  - `SPOT:FLATTEN` sell `1634.36 @ 0.03655`, fee `0.05973585 USDT`
+- `carry_exit_loss_cut` 判定:
+  - `in_funding_window=true`
+  - `entry_gross_pnl_usdt=0.19632`
+  - `exit_gross_pnl_usdt=-0.19612368`
+  - `exit_fee_usdt_est=0.0681265021032`
+  - `total_est_net_bps=-11.3345`
+  - fee込み即時exit赤字で、funding取得前にflattenした。
+- 終了後read-only:
+  - `SPOT open orders=0`
+  - `Futures open orders=0`
+  - `Futures SAHARAUSDT position=0.0`
+  - `SPOT SAHARA available=0.008`
+  - `SPOT SAHARA frozen=0.0`
+
+### 推論
+- `QUOTE_ASK -> SPOT:HEDGE` の実約定パスは成立。
+- `perp_pos + spot_pos ≒ 0` は維持された。
+- ただし funding window内に fee込み損切りで即flattenしたため、funding取得を狙うhold条件として不適切。
+- loss cutは funding window外では fee込みnetでよいが、funding window内は basis悪化そのものを見て判定すべき。
+
+### 実装
+- `bot\strategy\mm_funding.py`
+  - `gross_roundtrip_usdt = entry_gross + exit_gross` を追加。
+  - `gross_roundtrip_bps` を追加。
+  - `carry_exit_hold_funding_window=True` かつ funding window内では、loss cutを `gross_roundtrip_bps <= -carry_exit_max_loss_bps` に変更。
+  - funding window外では従来通り `total_est_net_bps` でloss cut。
+  - decision logに `gross_roundtrip_usdt`, `gross_roundtrip_bps`, `loss_cut_basis` を追加。
+- `tests\test_phase_d_strategy.py`
+  - funding window内で fee込みnetが赤字でも、gross basisが壊れていなければflattenしないテストを追加。
+
+### 検証
+- `.venv\Scripts\python.exe -m py_compile bot\strategy\mm_funding.py tests\test_phase_d_strategy.py`: pass
+- `.venv\Scripts\python.exe -m pytest -q tests\test_phase_d_strategy.py`: `7 passed`
+- `.venv\Scripts\python.exe -m pytest -q tests\test_hedge_ticket_flatten_race.py`: `25 passed`
+- `.venv\Scripts\python.exe -m pytest -q`: `136 passed`
+- `config.yaml` 差分なし。
+
+### 未確定点
+- 修正後の `SAHARAUSDT live bounded` は未実施。
+- funding window内で実際にfundingを受け取るパスは未確認。

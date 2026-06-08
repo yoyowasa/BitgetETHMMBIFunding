@@ -1942,9 +1942,16 @@ class MMFundingStrategy:
         )
         notional = max(abs(spot_exit_notional), abs(perp_exit_notional), 1e-12)
         total_est_net_bps = total_est_net_usdt / notional * 10000.0
-        loss_cut = total_est_net_bps <= -abs(cfg.carry_exit_max_loss_bps)
+        gross_roundtrip_usdt = snapshot.entry_gross_pnl_usdt + exit_gross_pnl_usdt
+        gross_roundtrip_bps = gross_roundtrip_usdt / notional * 10000.0
         in_funding_window = self._in_funding_window(now)
         outside_window = not in_funding_window or not cfg.carry_exit_hold_funding_window
+        if outside_window:
+            loss_cut = total_est_net_bps <= -abs(cfg.carry_exit_max_loss_bps)
+            loss_cut_basis = "net_after_exit_fee"
+        else:
+            loss_cut = gross_roundtrip_bps <= -abs(cfg.carry_exit_max_loss_bps)
+            loss_cut_basis = "gross_basis_only_in_funding_window"
         take_profit = outside_window and total_est_net_bps >= cfg.carry_exit_min_net_bps
         profit_eroded = outside_window and total_est_net_bps <= cfg.carry_exit_min_net_bps
         if loss_cut:
@@ -1975,8 +1982,11 @@ class MMFundingStrategy:
                 "entry_gross_pnl_usdt": snapshot.entry_gross_pnl_usdt,
                 "exit_gross_pnl_usdt": exit_gross_pnl_usdt,
                 "exit_fee_usdt_est": exit_fee_usdt_est,
+                "gross_roundtrip_usdt": gross_roundtrip_usdt,
+                "gross_roundtrip_bps": gross_roundtrip_bps,
                 "total_est_net_usdt": total_est_net_usdt,
                 "total_est_net_bps": total_est_net_bps,
+                "loss_cut_basis": loss_cut_basis,
                 "carry_exit_min_net_bps": cfg.carry_exit_min_net_bps,
                 "carry_exit_max_loss_bps": cfg.carry_exit_max_loss_bps,
                 "in_funding_window": in_funding_window,
