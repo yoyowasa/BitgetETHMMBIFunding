@@ -4728,3 +4728,47 @@ ec1b00a  chore: bulk update after lint & format
 ### 未確定点
 - `HEDGE_MAX_TRIES` / `HEDGE_CHASE_SLIP_BPS` 調整でliveのunhedged flattenが減るかは未確認。
 - funding window内だけに限定した場合の実約定頻度と収益性は未確認。
+
+---
+
+## 2026-06-09 funding window前 scan / SKYAIUSDT DRY確認
+
+### 観測事実
+- 現在時刻確認: `2026-06-09 15:58 JST`
+- 次funding window: `2026-06-09 16:55〜17:05 JST`
+- `config.yaml` 変更なし。
+- read-only確認:
+  - `VELVETUSDT`: `SPOT open orders=0`, `Futures open orders=0`, `Futures position=0.0`, `SPOT available=0.00845`, `frozen=0.0`
+  - `SKYAIUSDT`: `SPOT open orders=0`, `Futures open orders=0`, `Futures position=0.0`, `SPOT available=0.004`, `frozen=0.0`
+- ask-edge scan:
+  - `SKYAIUSDT`: `ask_side_edge_bps=41.35`, `funding_bps=5.66`, `spot_quote_volume=7315511`, `perp_quote_volume=12400623`
+  - `VELVETUSDT`: `ask_side_edge_bps=22.02`, `funding_bps=1.09`, `spot_quote_volume=3355295`, `perp_quote_volume=27668488`
+  - `RAVEUSDT`: `ask_side_edge_bps=20.48`, `funding_bps=0.5`, `spot_quote_volume=1358563`, `perp_quote_volume=3835481`
+- 対象log: `runtime_logs\dry_symbol_SKYAIUSDT_wide14_tfi0p7_onesided0p8_5min_20260609_155959`
+  - 条件: `SYMBOL=SKYAIUSDT`, `BASE_HALF_SPREAD_BPS=14`, `MIN_HALF_SPREAD_BPS=14`, `TFI_FADE_POLICY=threshold_0p7`, `ONE_SIDED_QUOTE_POLICY=tfi_0p8`, `HEDGE_MAX_TRIES=4`, `HEDGE_CHASE_SLIP_BPS=8.5`
+  - `fill_count=0`
+  - `pnl_net_sum=0.0`
+  - `order_new=145`, `order_cancel=145`
+  - 全て `QUOTE_ASK`
+  - `expected_edge_bps` median `4.90`
+  - `ask_side_edge_bps` median `49.53`
+  - `bid_side_edge_bps` median `-63.42`
+  - `order_resp_codes={"None": 290}` DRY由来
+  - `shutdown_cancel_all_done=1`
+
+### 推論
+- funding window前の候補は `SKYAIUSDT` が最有力。
+- `VELVETUSDT` より `expected_edge_bps` と `ask_side_edge_bps` が強く、同じASK片側ロジックで検証価値が高い。
+- ただしwindow外liveはexit churnリスクが高いため、次は `CARRY_ENTRY_FUNDING_WINDOW_ONLY=1` を入れたwindow内boundedで確認する。
+
+### 実装
+- 追加実装なし。
+- `config.yaml` 変更なし。
+
+### 検証
+- `SKYAIUSDT` DRY 5分はgraceful shutdown。
+- 終了後read-onlyで `open orders=0`, `Futures position=0.0` を確認。
+
+### 未確定点
+- `SKYAIUSDT` funding window内liveの実約定パスは未確認。
+- `HEDGE_MAX_TRIES=4`, `HEDGE_CHASE_SLIP_BPS=8.5` が実ヘッジ完了率を改善するかは未確認。
