@@ -4603,3 +4603,62 @@ ec1b00a  chore: bulk update after lint & format
 ### 未確定点
 - `12bps + TFI 0.7 + one-sided 0.8` の30分再現性は未確認。
 - SAHARA単体で黒字化できるかは未確定。
+
+---
+
+## 2026-06-09 SAHARAUSDT live bounded 30分 / funding-offで不成立
+
+### 観測事実
+- 対象log: `runtime_logs\live_symbol_SAHARAUSDT_wide12_tfi0p7_onesided0p8_30min_20260609_135543`
+- 条件:
+  - `SYMBOL=SAHARAUSDT`
+  - `BASE_HALF_SPREAD_BPS=12`
+  - `MIN_HALF_SPREAD_BPS=12`
+  - `TFI_FADE_POLICY=threshold_0p7`
+  - `ONE_SIDED_QUOTE_POLICY=tfi_0p8`
+  - `CARRY_EXIT_ENABLED=1`
+- 結果:
+  - `duration_sec=1802.55`
+  - `fill_count=0`
+  - `pnl_net_sum=0.0`
+  - `order_resp_codes={}`
+  - `pnl_nonzero_rows=0`
+- 主なblock:
+  - `funding_off=2396`
+  - `quote_fade=2354`
+  - `pre_quote_decision=2118`
+  - `quote_fade_suppressed=1673`
+- `pre_quote_decision` では `funding_bps=-5.02` から `-4.52`、`expected_edge_bps=-9.82` から `-9.32`、`edge_pass=false`。
+- 終了後read-only:
+  - `SPOT open orders=0`
+  - `Futures open orders=0`
+  - `Futures SAHARAUSDT position=0.0`
+  - `SPOT SAHARA available=0.00702`
+  - `SPOT SAHARA frozen=0.0`
+
+### 推論
+- 約定ゼロはone-sided条件の失敗ではなく、SAHARAのfundingが負転してASK edgeが消えたため。
+- `12bps + TFI 0.7 + one-sided 0.8` の30分収益性はこのrunでは評価不能。
+- SAHARA固定ではfunding regime依存が強い。正fundingかつASK edgeが残る銘柄へ切替検証が必要。
+
+### 銘柄scan
+- 実行: `scripts\scan_side_edge_symbols.py --config config.yaml --side ask --include-funding --require-positive-funding --limit 30 --json`
+- `candidate_count=32`
+- 流動性込みの次候補:
+  - `VELVETUSDT`: `ask_edge_bps=13.81`, `funding_bps=2.74`, `spot_quote_volume=3113589`, `perp_quote_volume=26190153`
+  - `SKYAIUSDT`: `ask_edge_bps=19.53`, `funding_bps=0.79`, `spot_quote_volume=6674755`, `perp_quote_volume=11874050`
+  - `RAVEUSDT`: `ask_edge_bps=28.02`, `funding_bps=0.5`, `spot_quote_volume=1365291`, `perp_quote_volume=3729190`
+  - `MUSDT`: `ask_edge_bps=24.79`, `funding_bps=7.12`, `spot_quote_volume=604648`, `perp_quote_volume=1089515`
+  - `JCTUSDT`: `ask_edge_bps=45.38`, `funding_bps=0.5`, `spot_quote_volume=2088119`, `perp_quote_volume=1148899`
+
+### 実装
+- 追加実装なし。
+- `config.yaml` 変更なし。
+
+### 検証
+- bounded runはgraceful shutdownで終了。
+- 終了後read-onlyで `open orders=0`, `Futures position=0.0` を確認。
+
+### 未確定点
+- 次候補で実際に `QUOTE_ASK -> SPOT:HEDGE -> exit/hold` が正の期待値になるかは未確認。
+- 銘柄変更時はまずDRY boundedで制約・ログ・停止挙動を確認する。
