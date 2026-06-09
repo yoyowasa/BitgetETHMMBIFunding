@@ -224,6 +224,14 @@ def apply_env_overrides(config: AppConfig) -> None:
     if min_half_spread_bps is not None:
         config.strategy.min_half_spread_bps = min_half_spread_bps
 
+    tfi_fade_policy = os.getenv("TFI_FADE_POLICY")
+    if tfi_fade_policy:
+        config.strategy.tfi_fade_policy = tfi_fade_policy
+
+    tfi_fade_threshold = _env_float("TFI_FADE_THRESHOLD")
+    if tfi_fade_threshold is not None:
+        config.strategy.tfi_fade_threshold = tfi_fade_threshold
+
     quote_refresh_ms = _env_int("QUOTE_REFRESH_MS")
     if quote_refresh_ms is not None:
         config.strategy.quote_refresh_ms = quote_refresh_ms

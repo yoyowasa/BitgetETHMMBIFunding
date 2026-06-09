@@ -4432,3 +4432,68 @@ ec1b00a  chore: bulk update after lint & format
 ### 未確定点
 - 修正後の `SAHARAUSDT half_spread=12bps live bounded` は未実施。
 - gross basis hold後に netで利確できるかは未確認。
+
+---
+
+## 2026-06-09 SAHARAUSDT live bounded 15分 / gross basis exit再検証とTFI override追加
+
+### 観測事実
+- 対象log: `runtime_logs\live_symbol_SAHARAUSDT_wide12_carry_exit_grossbasis_15min_20260609_094637`
+- 起動前read-only:
+  - `SPOT open orders=0`
+  - `Futures open orders=0`
+  - `Futures SAHARAUSDT position=0.0`
+  - `SPOT SAHARA available=0.01802`
+  - `SPOT SAHARA frozen=0.0`
+- bounded結果:
+  - `duration_sec=902.985`
+  - `fill_count=77`
+  - `QUOTE_ASK=10`
+  - `SPOT:HEDGE=21`
+  - `USDT-FUTURES:FLATTEN=9`
+  - `SPOT:FLATTEN=37`
+  - `rough_pair_net_usdt_known=0.83945585`
+  - `pnl_net_sum=-0.31032098513`
+  - `order_reject=0`
+  - `resp_code 22002=0`
+  - `shutdown_flatten_positions_done=1`
+  - `shutdown_cancel_all_done=1`
+- 終了後read-only:
+  - `SPOT open orders=0`
+  - `Futures open orders=0`
+  - `Futures SAHARAUSDT position=0.0`
+  - `SPOT SAHARA available=0.00002`
+  - `SPOT SAHARA frozen=0.0`
+- `carry_exit_loss_cut` は `loss_cut_basis=gross_basis` で発火。
+  - loss_cut 7件の中央値: `age_sec=3.30`, `gross_roundtrip_bps=-16.88`, `total_est_net_bps=-28.24`
+- `carry_exit_take_profit_outside_funding_window` は1件発火。
+  - `gross_roundtrip_bps=14.12`
+  - `total_est_net_bps=2.76`
+- `tfi_fade_policy` は `config.yaml` 上 `disabled`。
+  - 強いTFI時の `tfi_fade_suppressed` が出ており、ASK quoteが逆行に巻き込まれている。
+
+### 推論
+- fee-only churnは解消したが、SAHARA 12bpsではentry直後のgross basis悪化が大きい。
+- 粗いentry/hedge単体はプラスでも、短時間の逆行でFLATTEN損が上回る。
+- 次の優先改善は `tfi_fade_policy` を有効化し、強いフロー方向に逆らうASKを遠ざける/抑制すること。
+- `config.yaml` を変更せずに検証するため、env overrideが必要。
+
+### 実装
+- `bot\config.py`
+  - `TFI_FADE_POLICY` env overrideを追加。
+  - `TFI_FADE_THRESHOLD` env overrideを追加。
+- `tests\test_config_apis.py`
+  - `TFI_FADE_POLICY=threshold_0p7`
+  - `TFI_FADE_THRESHOLD=0.55`
+  - env override反映テストを追加。
+
+### 検証
+- `.venv\Scripts\python.exe -m py_compile bot\config.py`: pass
+- `.venv\Scripts\python.exe -m pytest -q tests\test_config_apis.py tests\test_tfi_fade_policy.py`: `9 passed`
+- `.venv\Scripts\python.exe -m pytest -q tests\test_phase_d_strategy.py`: `8 passed`
+- `.venv\Scripts\python.exe -m pytest -q`: `137 passed`
+- `config.yaml` 差分なし。
+
+### 未確定点
+- `TFI_FADE_POLICY=threshold_0p7` での `SAHARAUSDT half_spread=12bps live bounded` は未実施。
+- TFI filterでfill数低下と損失低下のどちらが強く出るかは未確認。
