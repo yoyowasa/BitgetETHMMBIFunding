@@ -4551,3 +4551,55 @@ ec1b00a  chore: bulk update after lint & format
 ### 未確定点
 - `ONE_SIDED_QUOTE_POLICY=tfi_0p7` の live bounded は未実施。
 - ASK抑制で損失が減るか、fillが減りすぎるかは未確認。
+
+---
+
+## 2026-06-09 SAHARAUSDT live bounded追加比較 / one-sided閾値とspread
+
+### 観測事実
+- 対象log 1: `runtime_logs\live_symbol_SAHARAUSDT_wide12_tfi0p7_onesided0p7_15min_20260609_102312`
+  - 条件: `BASE_HALF_SPREAD_BPS=12`, `TFI_FADE_POLICY=threshold_0p7`, `ONE_SIDED_QUOTE_POLICY=tfi_0p7`
+  - `fill_count=0`
+  - `pnl_net_sum=0.0`
+  - `one_sided_quote_suppressed=507`
+  - `order_reject=0`, `resp_code 22002=0`
+  - 終了後read-only: `SPOT open orders=0`, `Futures open orders=0`, `Futures position=0.0`, `SPOT SAHARA available=0.00002`, `frozen=0.0`
+- 対象log 2: `runtime_logs\live_symbol_SAHARAUSDT_wide12_tfi0p7_onesided0p8_15min_20260609_103915`
+  - 条件: `BASE_HALF_SPREAD_BPS=12`, `TFI_FADE_POLICY=threshold_0p7`, `ONE_SIDED_QUOTE_POLICY=tfi_0p8`
+  - `fill_count=38`
+  - `QUOTE_ASK=5`, `SPOT:HEDGE=10`, `USDT-FUTURES:FLATTEN=7`, `SPOT:FLATTEN=16`
+  - `rough_pair_net_usdt_known=0.4601663`
+  - `pnl_net_sum=-0.0272112645`
+  - `one_sided_quote_suppressed=555`
+  - `order_reject=0`, `resp_code 22002=0`
+  - 終了後read-only: `SPOT open orders=0`, `Futures open orders=0`, `Futures position=0.0`, `SPOT SAHARA available=0.00702`, `frozen=0.0`
+- 対象log 3: `runtime_logs\live_symbol_SAHARAUSDT_wide14_tfi0p7_onesided0p8_15min_20260609_105501`
+  - 条件: `BASE_HALF_SPREAD_BPS=14`, `TFI_FADE_POLICY=threshold_0p7`, `ONE_SIDED_QUOTE_POLICY=tfi_0p8`
+  - `fill_count=2`
+  - `QUOTE_ASK=1`, `USDT-FUTURES:FLATTEN=1`
+  - `SPOT:HEDGE=0`
+  - `rough_pair_net_usdt_known=0`
+  - `pnl_net_sum=-0.03362868`
+  - `one_sided_quote_suppressed=796`
+  - `order_reject=0`, `resp_code 22002=0`
+  - 終了後read-only: `SPOT open orders=0`, `Futures open orders=0`, `Futures position=0.0`, `SPOT SAHARA available=0.00702`, `frozen=0.0`
+
+### 推論
+- `tfi_0p7` は厳しすぎて約定機会が消える。
+- `tfi_0p8` は約定を残し、損失を最小化したが、15分ではまだ小幅マイナス。
+- half spread `14bps` は期待edgeは上がるが、fillが薄くなり、単発約定のshutdown flattenコストが目立つ。
+- 現時点の最良候補は `BASE_HALF_SPREAD_BPS=12`, `TFI_FADE_POLICY=threshold_0p7`, `ONE_SIDED_QUOTE_POLICY=tfi_0p8`。
+- ただし収益化判断には未達。次は bounded 30分で同条件の再現性を見るか、銘柄比較へ戻す段階。
+
+### 実装
+- 追加実装なし。
+- `config.yaml` 変更なし。
+
+### 検証
+- 各run後read-onlyで `open orders=0`, `Futures position=0.0` を確認。
+- `order_reject=0`
+- `resp_code 22002=0`
+
+### 未確定点
+- `12bps + TFI 0.7 + one-sided 0.8` の30分再現性は未確認。
+- SAHARA単体で黒字化できるかは未確定。
