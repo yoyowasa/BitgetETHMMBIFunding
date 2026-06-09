@@ -232,6 +232,10 @@ def apply_env_overrides(config: AppConfig) -> None:
     if tfi_fade_threshold is not None:
         config.strategy.tfi_fade_threshold = tfi_fade_threshold
 
+    one_sided_quote_policy = os.getenv("ONE_SIDED_QUOTE_POLICY")
+    if one_sided_quote_policy:
+        config.strategy.one_sided_quote_policy = one_sided_quote_policy
+
     quote_refresh_ms = _env_int("QUOTE_REFRESH_MS")
     if quote_refresh_ms is not None:
         config.strategy.quote_refresh_ms = quote_refresh_ms

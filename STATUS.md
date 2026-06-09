@@ -4497,3 +4497,57 @@ ec1b00a  chore: bulk update after lint & format
 ### 未確定点
 - `TFI_FADE_POLICY=threshold_0p7` での `SAHARAUSDT half_spread=12bps live bounded` は未実施。
 - TFI filterでfill数低下と損失低下のどちらが強く出るかは未確認。
+
+---
+
+## 2026-06-09 SAHARAUSDT live bounded 15分 / TFI fade検証とone-sided override追加
+
+### 観測事実
+- 対象log: `runtime_logs\live_symbol_SAHARAUSDT_wide12_tfi0p7_15min_20260609_100523`
+- 条件:
+  - `BASE_HALF_SPREAD_BPS=12`
+  - `MIN_HALF_SPREAD_BPS=12`
+  - `TFI_FADE_POLICY=threshold_0p7`
+  - `CARRY_EXIT_ENABLED=1`
+- bounded結果:
+  - `duration_sec=902.852`
+  - `fill_count=39`
+  - `QUOTE_ASK=8`
+  - `SPOT:HEDGE=13`
+  - `USDT-FUTURES:FLATTEN=8`
+  - `SPOT:FLATTEN=10`
+  - `rough_pair_net_usdt_known=0.4051935`
+  - `pnl_net_sum=-0.1339867177`
+  - `order_reject=0`
+  - `resp_code 22002=0`
+  - `shutdown_flatten_positions_done=1`
+  - `shutdown_cancel_all_done=1`
+- 終了後read-only:
+  - `SPOT open orders=0`
+  - `Futures open orders=0`
+  - `Futures SAHARAUSDT position=0.0`
+  - `SPOT SAHARA available=0.00002`
+  - `SPOT SAHARA frozen=0.0`
+- `tfi_fade=608`、`tfi_fade_suppressed=61`。
+- TFI fadeで損失は縮小したが、ASK quoteは継続して出ており、マイナスは残った。
+
+### 推論
+- TFI fadeは有効だが、価格を遠ざけるだけでは不十分。
+- 強い正TFI時は、SAHARAのASK quote自体を抑制する必要がある。
+- `one_sided_quote_policy=tfi_0p7` をenvで検証できるようにするのが次の最小変更。
+
+### 実装
+- `bot\config.py`
+  - `ONE_SIDED_QUOTE_POLICY` env overrideを追加。
+- `tests\test_config_apis.py`
+  - `ONE_SIDED_QUOTE_POLICY=tfi_0p7` の反映テストを追加。
+
+### 検証
+- `.venv\Scripts\python.exe -m py_compile bot\config.py`: pass
+- `.venv\Scripts\python.exe -m pytest -q tests\test_config_apis.py tests\test_one_sided_quote_policy.py tests\test_tfi_fade_policy.py`: `11 passed`
+- `.venv\Scripts\python.exe -m pytest -q`: `137 passed`
+- `config.yaml` 差分なし。
+
+### 未確定点
+- `ONE_SIDED_QUOTE_POLICY=tfi_0p7` の live bounded は未実施。
+- ASK抑制で損失が減るか、fillが減りすぎるかは未確認。

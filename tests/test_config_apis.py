@@ -100,6 +100,7 @@ def test_apply_env_overrides_runtime_strategy_params(
     monkeypatch.setenv("MIN_HALF_SPREAD_BPS", "21")
     monkeypatch.setenv("TFI_FADE_POLICY", "threshold_0p7")
     monkeypatch.setenv("TFI_FADE_THRESHOLD", "0.55")
+    monkeypatch.setenv("ONE_SIDED_QUOTE_POLICY", "tfi_0p7")
     monkeypatch.setenv("QUOTE_REFRESH_MS", "800")
     monkeypatch.setenv("HEDGE_AGGRESSIVE_BPS", "7.5")
     monkeypatch.setenv("HEDGE_DEADLINE_SEC", "2.25")
@@ -113,6 +114,7 @@ def test_apply_env_overrides_runtime_strategy_params(
     assert config.strategy.min_half_spread_bps == 21.0
     assert config.strategy.tfi_fade_policy == "threshold_0p7"
     assert config.strategy.tfi_fade_threshold == 0.55
+    assert config.strategy.one_sided_quote_policy == "tfi_0p7"
     assert config.strategy.quote_refresh_ms == 800
     assert config.hedge.hedge_aggressive_bps == 7.5
     assert config.hedge.hedge_deadline_sec == 2.25
