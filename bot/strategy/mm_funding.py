@@ -886,6 +886,64 @@ class MMFundingStrategy:
             )
             return
 
+        if (
+            self._config.strategy.carry_entry_funding_window_only
+            and not self._in_funding_window(now)
+        ):
+            self._log_pre_quote_decision(
+                now,
+                final_block_reason="funding_window_off",
+                expected_edge_fields={
+                    "expected_edge_bps": expected_edge_bps,
+                    "expected_spread_bps": expected_spread_bps,
+                    "funding_bps": funding_bps,
+                    "cost_bps": cost_bps,
+                    "adverse_buffer_bps": adverse_buffer_bps,
+                },
+                book_stale=False,
+                funding_stale=False,
+                quote_fade_triggered=False,
+                cancel_aggressive_triggered=False,
+                tfi_fade_triggered=False,
+                one_sided_suppressed_bid=False,
+                one_sided_suppressed_ask=False,
+                final_should_quote_bid=False,
+                final_should_quote_ask=False,
+            )
+            self._state = StrategyState.STOPPED
+            await self._oms.cancel_all(reason="funding_window_off")
+            self._decision_logger.log(
+                {
+                    "ts": now,
+                    "event": "risk",
+                    "intent": "quote",
+                    "source": "strategy",
+                    "mode": self._state.value,
+                    "reason": "funding_window_off",
+                    "leg": None,
+                    "cycle_id": self._cycle_id,
+                    "expected_spread_bps": expected_spread_bps,
+                    "funding_bps": funding_bps,
+                    "cost_bps": cost_bps,
+                    "adverse_buffer_bps": adverse_buffer_bps,
+                    "expected_edge_bps": expected_edge_bps,
+                    "expected_edge_usdt": expected_edge_usdt,
+                }
+            )
+            self._log_decision(
+                now,
+                spot_bbo,
+                perp_bbo,
+                funding.funding_rate,
+                basis,
+                obi_spot,
+                obi_perp,
+                target_q,
+                "funding_window_off",
+                tfi,
+            )
+            return
+
         bid_px = reservation * (1 - (half_bps + bid_funding_adjust) / 10000.0)
         ask_px = reservation * (1 + (half_bps + ask_funding_adjust) / 10000.0)
         tfi_fade_leg = check_tfi_fade(

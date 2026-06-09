@@ -4662,3 +4662,69 @@ ec1b00a  chore: bulk update after lint & format
 ### 未確定点
 - 次候補で実際に `QUOTE_ASK -> SPOT:HEDGE -> exit/hold` が正の期待値になるかは未確認。
 - 銘柄変更時はまずDRY boundedで制約・ログ・停止挙動を確認する。
+
+---
+
+## 2026-06-09 VELVETUSDT bounded検証 / hedge期限とexit churn
+
+### 観測事実
+- 対象log 1: `runtime_logs\dry_symbol_VELVETUSDT_wide12_tfi0p7_onesided0p8_10min_20260609_143000`
+  - `fill_count=0`
+  - `pnl_net_sum=0.0`
+  - `edge_negative_total=2112`
+  - `expected_spread_bps=24.0`, `cost_bps=26.8`, `expected_edge_bps=-2.0`
+  - `config.yaml` のscan前提は `half_spread_bps=14.0` だったため、wide12では評価不成立。
+- 対象log 2: `runtime_logs\dry_symbol_VELVETUSDT_wide14_tfi0p7_onesided0p8_10min_20260609_144222`
+  - `fill_count=0`
+  - `order_new=483`, `order_cancel=483`
+  - 全て `QUOTE_ASK`
+  - `expected_edge_bps=1.42〜1.83`
+  - `ask_side_edge_bps` median `12.95`
+  - `bid_side_edge_bps` median `-36.90`
+  - DRY上はASK片側候補として成立。
+- 対象log 3: `runtime_logs\live_symbol_VELVETUSDT_wide14_tfi0p7_onesided0p8_5min_20260609_145328`
+  - `fill_count=54`
+  - `USDT-FUTURES:QUOTE_ASK=13`, sell qty `1799.0`
+  - `SPOT:HEDGE=12`, buy qty `981.55`
+  - `USDT-FUTURES:FLATTEN=17`, buy qty `1799.0`
+  - `SPOT:FLATTEN=12`, sell qty `980.56`
+  - `rough_pair_net_usdt_known=0.37748252`
+  - `pnl_net_sum=-0.8632235632`
+  - `unhedged_exceeded_deferred_for_hedge_ticket=34`
+  - `unhedged_exceeded=12`
+  - `carry_exit_loss_cut=6`
+  - `order_resp_codes`: `00000=397`, `43001=15`
+  - 終了後read-only: `SPOT open orders=0`, `Futures open orders=0`, `Futures position=0.0`, `SPOT VELVET available=0.00845`, `frozen=0.0`
+
+### 推論
+- `QUOTE_ASK -> SPOT:HEDGE` の個別ペアはプラスだが、spot hedgeが完了しないticketが多く、期限後にfutures flattenへ落ちている。
+- `hedge_deadline_sec=1.5`, `hedge_max_tries=2`, `max_unhedged_sec=2.0` が短く、薄いspot板ではヘッジ完了前のflattenが損失源になる。
+- hedged carry成立後も `CARRY_EXIT_MIN_HOLD_SEC=2` と `CARRY_EXIT_MAX_LOSS_BPS=5` で数秒後に損切りされ、entry粗利を消している。
+- funding window外の新規entryは、短時間boundedではexit churnになりやすい。
+
+### 実装
+- `bot\config.py`
+  - `HEDGE_MAX_TRIES` env overrideを追加。
+  - `HEDGE_CHASE_SLIP_BPS` env overrideを追加。
+  - `CARRY_ENTRY_FUNDING_WINDOW_ONLY` env overrideを追加。
+- `bot\strategy\mm_funding.py`
+  - `carry_entry_funding_window_only=true` かつ funding window外なら新規quoteを `funding_window_off` で停止。
+- `tests\test_config_apis.py`
+  - 追加env overrideの反映テストを追加。
+- `config.yaml` 変更なし。
+
+### 検証
+- `.venv\Scripts\python.exe -m py_compile bot\config.py bot\strategy\mm_funding.py`: pass
+- `.venv\Scripts\python.exe -m pytest -q tests\test_config_apis.py tests\test_hedge_ticket_flatten_race.py`: `28 passed`
+- `.venv\Scripts\python.exe -m pytest -q`: `137 passed`
+- 対象log: `runtime_logs\dry_symbol_VELVETUSDT_funding_window_only_2min_20260609_150241`
+  - `funding_window_off=420`
+  - `pre_quote_blocks.funding_window_off=210`
+  - `order_resp_codes={}`
+  - `fill_count=0`
+  - `pnl_net_sum=0.0`
+- `config.yaml` 変更なし。
+
+### 未確定点
+- `HEDGE_MAX_TRIES` / `HEDGE_CHASE_SLIP_BPS` 調整でliveのunhedged flattenが減るかは未確認。
+- funding window内だけに限定した場合の実約定頻度と収益性は未確認。

@@ -85,6 +85,7 @@ class StrategyConfig:
     carry_exit_max_loss_bps: float = 5.0
     carry_exit_min_hold_sec: float = 2.0
     carry_exit_hold_funding_window: bool = True
+    carry_entry_funding_window_only: bool = False
     dry_run: bool = False
 
 
@@ -248,6 +249,14 @@ def apply_env_overrides(config: AppConfig) -> None:
     if hedge_deadline_sec is not None:
         config.hedge.hedge_deadline_sec = hedge_deadline_sec
 
+    hedge_max_tries = _env_int("HEDGE_MAX_TRIES")
+    if hedge_max_tries is not None:
+        config.hedge.hedge_max_tries = hedge_max_tries
+
+    hedge_chase_slip_bps = _env_float("HEDGE_CHASE_SLIP_BPS")
+    if hedge_chase_slip_bps is not None:
+        config.hedge.hedge_chase_slip_bps = hedge_chase_slip_bps
+
     side_edge_guard = _env_bool("SIDE_EDGE_GUARD")
     if side_edge_guard is not None:
         config.strategy.side_edge_guard_enabled = side_edge_guard
@@ -275,3 +284,9 @@ def apply_env_overrides(config: AppConfig) -> None:
     carry_exit_hold_funding_window = _env_bool("CARRY_EXIT_HOLD_FUNDING_WINDOW")
     if carry_exit_hold_funding_window is not None:
         config.strategy.carry_exit_hold_funding_window = carry_exit_hold_funding_window
+
+    carry_entry_funding_window_only = _env_bool("CARRY_ENTRY_FUNDING_WINDOW_ONLY")
+    if carry_entry_funding_window_only is not None:
+        config.strategy.carry_entry_funding_window_only = (
+            carry_entry_funding_window_only
+        )

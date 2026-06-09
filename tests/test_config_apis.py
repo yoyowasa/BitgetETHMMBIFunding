@@ -104,6 +104,9 @@ def test_apply_env_overrides_runtime_strategy_params(
     monkeypatch.setenv("QUOTE_REFRESH_MS", "800")
     monkeypatch.setenv("HEDGE_AGGRESSIVE_BPS", "7.5")
     monkeypatch.setenv("HEDGE_DEADLINE_SEC", "2.25")
+    monkeypatch.setenv("HEDGE_MAX_TRIES", "4")
+    monkeypatch.setenv("HEDGE_CHASE_SLIP_BPS", "8.5")
+    monkeypatch.setenv("CARRY_ENTRY_FUNDING_WINDOW_ONLY", "1")
 
     apply_env_overrides(config)
 
@@ -118,4 +121,7 @@ def test_apply_env_overrides_runtime_strategy_params(
     assert config.strategy.quote_refresh_ms == 800
     assert config.hedge.hedge_aggressive_bps == 7.5
     assert config.hedge.hedge_deadline_sec == 2.25
+    assert config.hedge.hedge_max_tries == 4
+    assert config.hedge.hedge_chase_slip_bps == 8.5
+    assert config.strategy.carry_entry_funding_window_only is True
 
