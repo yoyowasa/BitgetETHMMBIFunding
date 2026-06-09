@@ -1946,14 +1946,10 @@ class MMFundingStrategy:
         gross_roundtrip_bps = gross_roundtrip_usdt / notional * 10000.0
         in_funding_window = self._in_funding_window(now)
         outside_window = not in_funding_window or not cfg.carry_exit_hold_funding_window
-        if outside_window:
-            loss_cut = total_est_net_bps <= -abs(cfg.carry_exit_max_loss_bps)
-            loss_cut_basis = "net_after_exit_fee"
-        else:
-            loss_cut = gross_roundtrip_bps <= -abs(cfg.carry_exit_max_loss_bps)
-            loss_cut_basis = "gross_basis_only_in_funding_window"
+        loss_cut = gross_roundtrip_bps <= -abs(cfg.carry_exit_max_loss_bps)
+        loss_cut_basis = "gross_basis"
         take_profit = outside_window and total_est_net_bps >= cfg.carry_exit_min_net_bps
-        profit_eroded = outside_window and total_est_net_bps <= cfg.carry_exit_min_net_bps
+        profit_eroded = outside_window and gross_roundtrip_bps <= cfg.carry_exit_min_net_bps
         if loss_cut:
             reason = "carry_exit_loss_cut"
         elif take_profit:

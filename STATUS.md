@@ -4366,3 +4366,69 @@ ec1b00a  chore: bulk update after lint & format
 ### 未確定点
 - 修正後の `SAHARAUSDT live bounded` は未実施。
 - funding window内で実際にfundingを受け取るパスは未確認。
+
+---
+
+## 2026-06-09 SAHARAUSDT live bounded 15分/30分 / carry exit fee-only churn修正
+
+### 観測事実
+- 対象log 1: `runtime_logs\live_symbol_SAHARAUSDT_wide18_carry_exit_holdfix_15min_20260609_084009`
+  - `duration_sec=902.583`
+  - `fill_count=0`
+  - `order_reject=0`
+  - `resp_code 22002=0`
+  - `shutdown_cancel_all_done=1`
+  - 終了後read-only: `SPOT open orders=0`, `Futures open orders=0`, `Futures position=0.0`, `SPOT SAHARA available=0.008`, `frozen=0.0`
+  - `QUOTE_ASK` 新規は290本、中央値寿命は約`1.07s`。
+- 対象log 2: `runtime_logs\live_symbol_SAHARAUSDT_wide12_carry_exit_holdfix_15min_20260609_085652`
+  - `duration_sec=902.858`
+  - `fill_count=51`
+  - `QUOTE_ASK=8`, `SPOT:HEDGE=17`, `USDT-FUTURES:FLATTEN=8`, `SPOT:FLATTEN=18`
+  - `rough_pair_net_usdt_known=0.38572683`
+  - `pnl_net_sum=0.1389623855`
+  - `order_reject=0`, `resp_code 22002=0`
+  - 終了後read-only: `SPOT open orders=0`, `Futures open orders=0`, `Futures position=0.0`, `SPOT SAHARA available=0.016`, `frozen=0.0`
+- 対象log 3: `runtime_logs\live_symbol_SAHARAUSDT_wide12_carry_exit_holdfix_30min_20260609_091256`
+  - `duration_sec=1803.093`
+  - `fill_count=136`
+  - `QUOTE_ASK=16`, `SPOT:HEDGE=47`, `USDT-FUTURES:FLATTEN=19`, `SPOT:FLATTEN=54`
+  - `rough_pair_net_usdt_known=1.00213536`
+  - `pnl_net_sum=-0.32606298275`
+  - `order_reject=0`, `resp_code 22002=0`
+  - `shutdown_flatten_positions_done=1`, `shutdown_cancel_all_done=1`
+  - 終了後read-only: `SPOT open orders=0`, `Futures open orders=0`, `Futures position=0.0`, `SPOT SAHARA available=0.01802`, `frozen=0.0`
+- 30分logの `carry_exit_loss_cut` 例:
+  - `entry_gross_pnl_usdt=0.27296`
+  - `exit_gross_pnl_usdt=-0.2556453015`
+  - `gross_roundtrip_bps=2.8878`
+  - `total_est_net_bps=-8.4695`
+  - `loss_cut_basis=net_after_exit_fee`
+  - basisはまだプラスだが、exit fee込みnetが `-5bps` 未満になりloss_cutした。
+
+### 推論
+- `QUOTE_ASK -> SPOT:HEDGE -> FLATTEN` の実約定パスは成立。
+- half spread `18bps` は刺さりにくい。`12bps` は刺さる。
+- entry/hedge単体はプラスだが、fee込みnet loss_cutが早すぎてFLATTENコストで30分累計がマイナス化した。
+- 前回の「funding window外では fee込みnetでloss_cutしてよい」という推論は棄却。
+- loss_cutは全時間帯で gross basis悪化を見るべき。take profitだけ fee込みnetでよい。
+
+### 実装
+- `bot\strategy\mm_funding.py`
+  - `carry_exit_loss_cut` を全時間帯で `gross_roundtrip_bps <= -carry_exit_max_loss_bps` 判定に変更。
+  - `loss_cut_basis` を `gross_basis` に統一。
+  - `carry_exit_profit_eroded` も fee込みnetではなく `gross_roundtrip_bps <= carry_exit_min_net_bps` 判定に変更。
+  - `carry_exit_take_profit_outside_funding_window` は従来通り fee込みnetが `carry_exit_min_net_bps` 以上のときだけ発火。
+- `tests\test_phase_d_strategy.py`
+  - outside funding windowで fee込みnetだけ赤字、gross basisはプラスのケースではflattenしないテストを追加。
+  - 既存loss_cutテストは `gross_roundtrip_bps` で確認するよう更新。
+
+### 検証
+- `.venv\Scripts\python.exe -m py_compile bot\strategy\mm_funding.py tests\test_phase_d_strategy.py`: pass
+- `.venv\Scripts\python.exe -m pytest -q tests\test_phase_d_strategy.py`: `8 passed`
+- `.venv\Scripts\python.exe -m pytest -q tests\test_hedge_ticket_flatten_race.py`: `25 passed`
+- `.venv\Scripts\python.exe -m pytest -q`: `137 passed`
+- `config.yaml` 差分なし。
+
+### 未確定点
+- 修正後の `SAHARAUSDT half_spread=12bps live bounded` は未実施。
+- gross basis hold後に netで利確できるかは未確認。

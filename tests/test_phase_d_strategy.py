@@ -317,7 +317,75 @@ def test_carry_exit_loss_cut_flattens_before_quote(monkeypatch) -> None:
     assert oms.last_update_quotes is None
     exits = [record for record in logger.records if record.get("reason") == "carry_exit_loss_cut"]
     assert exits
-    assert exits[0]["total_est_net_bps"] <= -config.strategy.carry_exit_max_loss_bps
+    assert exits[0]["gross_roundtrip_bps"] <= -config.strategy.carry_exit_max_loss_bps
+
+
+def test_carry_exit_holds_fee_only_loss_outside_funding_window(monkeypatch) -> None:
+    from bot.strategy import mm_funding as module
+
+    monkeypatch.setattr(module.book_md, "snapshot_from_store", _snapshot_from_store)
+    monkeypatch.setattr(
+        module.book_md,
+        "bbo_from_snapshot",
+        lambda snapshot: SimpleNamespace(
+            bid=snapshot.bids[0][0],
+            ask=snapshot.asks[0][0],
+            bid_size=snapshot.bids[0][1],
+            ask_size=snapshot.asks[0][1],
+            ts=snapshot.ts,
+        ),
+    )
+    monkeypatch.setattr(module.book_md, "calc_mid", lambda bbo: (bbo.bid + bbo.ask) / 2.0)
+    monkeypatch.setattr(
+        module.book_md,
+        "calc_microprice",
+        lambda bbo: (bbo.ask * bbo.bid_size + bbo.bid * bbo.ask_size)
+        / (bbo.bid_size + bbo.ask_size),
+    )
+    monkeypatch.setattr(module.book_md, "calc_obi", lambda snapshot: 0.0)
+
+    config = _config()
+    config.strategy.carry_exit_enabled = True
+    config.strategy.carry_exit_max_loss_bps = 5.0
+    config.strategy.carry_exit_min_hold_sec = 0.0
+    oms = DummyOMS(spot_available=1704.3)
+    oms.positions.spot_pos = 1704.30201
+    oms.positions.perp_pos = -1706.0
+    oms.carry_snapshot = SimpleNamespace(
+        entry_gross_pnl_usdt=0.27296,
+        entry_qty=1706.0,
+        entry_ts=time.time() - 10.0,
+    )
+    funding_cache = SimpleNamespace(
+        last=FundingInfo(
+            funding_rate=0.001186,
+            next_update_time=None,
+            interval_sec=None,
+            ts=time.time(),
+        )
+    )
+    logger = DummyLogger()
+    strategy = MMFundingStrategy(config, funding_cache, oms, DummyRisk(), logger)
+    monkeypatch.setattr(strategy, "_in_funding_window", lambda now: False)
+
+    import asyncio
+
+    asyncio.run(
+        strategy._maybe_exit_carry_position(
+            now=time.time(),
+            spot_bbo=SimpleNamespace(bid=0.03503, ask=0.03504),
+            perp_bbo=SimpleNamespace(bid=0.03517, ask=0.03518),
+            funding_rate=0.001186,
+            basis=0.00014,
+            obi_spot=0.0,
+            obi_perp=0.0,
+            target_q=1421.0,
+            tfi=0.0,
+        )
+    )
+
+    assert oms.flatten_calls == []
+    assert "carry_exit_loss_cut" not in oms.cancel_reasons
 
 
 def test_carry_exit_holds_fee_only_loss_inside_funding_window(monkeypatch) -> None:
