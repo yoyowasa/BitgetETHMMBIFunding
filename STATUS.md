@@ -4814,3 +4814,51 @@ ec1b00a  chore: bulk update after lint & format
 ### 未確定点
 - funding window内liveの `QUOTE_ASK -> SPOT:HEDGE -> hold/exit` 実績は未確認。
 - liveで `HEDGE_MAX_TRIES=4`, `HEDGE_CHASE_SLIP_BPS=8.5` が未ヘッジflattenを減らすかは未確認。
+
+---
+
+## 2026-06-11 SKYAIUSDT funding window live 5分 / 未ヘッジunwind修正
+
+### 観測事実
+- 対象log: `runtime_logs\live_symbol_SKYAIUSDT_funding_window_5min_20260611_005500`
+- 条件: `SYMBOL=SKYAIUSDT`, `DRY_RUN=0`, `BASE_HALF_SPREAD_BPS=14`, `MIN_HALF_SPREAD_BPS=14`, `CARRY_ENTRY_FUNDING_WINDOW_ONLY=1`, `HEDGE_MAX_TRIES=4`, `HEDGE_CHASE_SLIP_BPS=8.5`, `CARRY_EXIT_ENABLED=1`
+- 起動前read-only: `SPOT open orders=0`, `Futures open orders=0`, `Futures position=0.0`, `SPOT available=0.004`, `frozen=0.0`
+- live bounded 5分は graceful shutdown。`shutdown_cancel_all_done=1`
+- `order_reject=0`, `fill_parse_warning=0`, `resp_code 22002=0`, `startup_open_spot_balance_detected=0`, `shutdown_cancel_all_failed=0`
+- `book_rx_rate`, `fill_monitor_heartbeat`, `positions_monitor_heartbeat` は出力あり。
+- `fill_count=14`
+  - `USDT-FUTURES:QUOTE_ASK`: 4 fills / sell `968.0`
+  - `SPOT:HEDGE`: 4 fills / buy `737.0`
+  - `USDT-FUTURES:FLATTEN`: 4 fills / buy `968.0`
+  - `SPOT:FLATTEN`: 2 fills / sell `736.26`
+- `pnl_net_sum=-0.24785299594999333`
+- 終了後read-only: `open orders=0`, `Futures position=0.0`, `SPOT available=0.007`, `frozen=0.0`
+- `00:59:22 JST` に既存hedged carry中の追加 `QUOTE_ASK` が約定し、追加分 `SPOT:HEDGE` は `7/238` のみ約定。
+- その後 `unhedged_exceeded` が `FLATTEN` を呼び、追加未ヘッジ分だけでなく既存hedged carryも巻き込んで全量撤退した。
+
+### 推論
+- `SKYAIUSDT` のentry側edgeは実約定でも成立しているが、損益悪化の主因はentryではなく未ヘッジ失敗時の全量flatten。
+- `HEDGE_MAX_TRIES=4`, `HEDGE_CHASE_SLIP_BPS=8.5` は前回より未ヘッジdeferを減らしたが、部分ヘッジ失敗時の撤退粒度が粗かった。
+- 既存carryを保持したまま、期限切れhedge ticketの残量だけを `UNWIND` reduce-only で戻す必要がある。
+
+### 実装
+- `bot/oms/oms.py`
+  - `unwind_open_hedge_ticket()` を追加。
+  - open hedge ticket の `remain` だけ `USDT-FUTURES:UNWIND` reduce-only で戻す。
+  - pending spot hedge order があれば先にcancelし、全量 `FLATTEN` は使わない。
+- `bot/strategy/mm_funding.py`
+  - `unhedged_exceeded` で期限切れ含むopen hedge ticketが残る場合、全量flatten前に `unwind_open_hedge_ticket()` を優先。
+  - ログ理由: `unhedged_exceeded_unwind_hedge_ticket`
+- `tests/test_hedge_ticket_flatten_race.py`
+  - 期限切れhedge ticket時に全量flattenしないことを固定。
+  - 既存carry `spot=365 / perp=-603` でticket残量 `231` のみ `UNWIND` する回帰テストを追加。
+- `config.yaml` 変更なし。
+
+### 検証
+- `pytest tests\test_hedge_ticket_flatten_race.py -q`: `26 passed`
+- `pytest -q`: `138 passed`
+- `git diff -- config.yaml`: 差分なし
+
+### 未確定点
+- 修正後のfunding window liveで `unhedged_exceeded_unwind_hedge_ticket -> UNWIND -> carry維持` が実約定で成立するかは未確認。
+- `carry_exit_loss_cut` の閾値は別途、funding settlement前後10分runで再評価が必要。

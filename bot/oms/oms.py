@@ -537,6 +537,95 @@ class OMS:
                 reason=reason,
             )
 
+    async def unwind_open_hedge_ticket(self, cycle_id: int, reason: str) -> bool:
+        async with self._get_symbol_lock(self._config.symbols.perp.symbol):
+            ticket = next(
+                (
+                    item
+                    for item in self._hedge_tickets.values()
+                    if item.status == "OPEN" and item.remain > 1e-9
+                ),
+                None,
+            )
+            if ticket is None:
+                self._orders_logger.log(
+                    {
+                        "ts": time.time(),
+                        "event": "order_skip",
+                        "intent": OrderIntent.UNWIND.value,
+                        "source": "oms",
+                        "mode": "RUN",
+                        "reason": "unwind_open_hedge_ticket_no_ticket",
+                        "leg": "perp_unwind",
+                        "cycle_id": cycle_id,
+                        "trigger_reason": reason,
+                        "action_taken": "skip_unwind",
+                    }
+                )
+                return False
+            if ticket.pending_qty > 1e-9:
+                await self._cancel_pending_hedge_order(ticket, reason="hedge_pending_expired")
+            remain = ticket.remain
+            if not self._hedge_cfg.unwind_enable or remain <= 1e-9:
+                return False
+            await self._cancel_all_quotes_unlocked(reason=reason)
+            req = OrderRequest(
+                inst_type=InstType.USDT_FUTURES,
+                symbol=self._config.symbols.perp.symbol,
+                side=ticket.side,
+                order_type=OrderType.MARKET,
+                size=remain,
+                force=Force.IOC,
+                client_oid=self._new_client_oid(OrderIntent.UNWIND, int(time.time() * 1000)),
+                intent=OrderIntent.UNWIND,
+                cycle_id=cycle_id,
+                reduce_only=True,
+            )
+            self._orders_logger.log(
+                {
+                    "event": "risk",
+                    "intent": OrderIntent.UNWIND.value,
+                    "source": "oms",
+                    "mode": "HEDGING",
+                    "reason": reason,
+                    "leg": "perp_unwind",
+                    "cycle_id": cycle_id,
+                    "ticket_id": ticket.ticket_id,
+                    "remain": remain,
+                    "tries": ticket.tries,
+                }
+            )
+            order_id = await self._submit_order(req, reason=reason)
+            if order_id:
+                self._unwind_pending_until = time.time() + max(
+                    2.0,
+                    self._hedge_cfg.hedge_deadline_sec,
+                )
+            ticket.status = "FAILED"
+            self._orders_logger.log(
+                {
+                    "ts": time.time(),
+                    "event": "state",
+                    "intent": OrderIntent.HEDGE.value,
+                    "source": "oms",
+                    "mode": "HEDGING",
+                    "reason": "ticket_unwind_started",
+                    "leg": "perp_unwind",
+                    "cycle_id": cycle_id,
+                    "ticket_id": ticket.ticket_id,
+                    "remain": remain,
+                    "tries": ticket.tries,
+                    "trigger_reason": reason,
+                    "unhedged_qty": self._unhedged_qty,
+                    "spot_pos_internal": self._positions.spot_pos,
+                    "perp_pos_internal": self._positions.perp_pos,
+                    "delta": self._positions.spot_pos + self._positions.perp_pos,
+                    "action_taken": "unwind_hedge_ticket",
+                }
+            )
+            self._cleanup_ticket(ticket.ticket_id)
+            return True
+
     def _should_skip_open_delta_flatten(
         self,
         spot_bbo: Optional[book_md.BBO],

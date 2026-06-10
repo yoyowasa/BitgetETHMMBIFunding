@@ -67,6 +67,7 @@ class StrategyOMS:
         self.unhedged_since = time.time() - 3.0
         self.cancel_reasons: list[str] = []
         self.flatten_calls: list[dict] = []
+        self.unwind_ticket_calls: list[dict] = []
         self.update_quote_calls: list[dict] = []
         self._defer_flatten = defer_flatten
         self._unwind_pending = unwind_pending
@@ -92,6 +93,13 @@ class StrategyOMS:
 
     async def flatten(self, spot_bbo, cycle_id: int, reason: str) -> None:
         self.flatten_calls.append({"cycle_id": cycle_id, "reason": reason})
+
+    async def unwind_open_hedge_ticket(self, cycle_id: int, reason: str) -> bool:
+        if self._ticket is None:
+            return False
+        self.unwind_ticket_calls.append({"cycle_id": cycle_id, "reason": reason})
+        self._ticket = None
+        return True
 
     def fail_open_tickets(self, reason: str) -> None:
         return None
@@ -379,11 +387,20 @@ def test_unhedged_exceeded_flattens_after_hedge_deadline(monkeypatch) -> None:
     logger = _run_strategy_step(monkeypatch, oms)
 
     assert oms.cancel_reasons == []
-    assert oms.flatten_calls == [{"cycle_id": 1, "reason": "unhedged_exceeded"}]
-    risks = [record for record in logger.records if record.get("reason") == "unhedged_exceeded"]
+    assert oms.flatten_calls == []
+    assert oms.unwind_ticket_calls == [
+        {"cycle_id": 1, "reason": "unhedged_exceeded_unwind_hedge_ticket"}
+    ]
+    risks = [
+        record
+        for record in logger.records
+        if record.get("reason") == "unhedged_exceeded_unwind_hedge_ticket"
+        and record.get("event") == "risk"
+        and record.get("source") == "strategy"
+    ]
     assert risks
     assert risks[-1]["has_open_hedge_ticket"] is True
-    assert risks[-1]["action_taken"] == "flatten"
+    assert risks[-1]["action_taken"] == "unwind_hedge_ticket"
 
 
 def test_unhedged_exceeded_defers_flatten_while_unwind_pending(monkeypatch) -> None:
@@ -453,6 +470,64 @@ def test_flatten_supersedes_open_hedge_ticket_and_stops_chase() -> None:
         for record in orders_logger.records
         if record.get("event") == "order_new" and record.get("intent") == "HEDGE"
     ] == []
+
+
+def test_unwind_open_hedge_ticket_preserves_existing_carry() -> None:
+    gateway = OMSGateway()
+    orders_logger = CapturingLogger()
+    oms = OMS(
+        gateway,
+        _config(),
+        risk=None,
+        orders_logger=orders_logger,
+        fills_logger=CapturingLogger(),
+    )
+    now = time.time()
+    oms.positions.spot_pos = 365.0
+    oms.positions.perp_pos = -603.0
+    oms._unhedged_qty = 238.0
+    oms._hedge_tickets["ticket-1"] = HedgeTicket(
+        ticket_id="ticket-1",
+        symbol="ETHUSDT",
+        side=Side.BUY,
+        want_qty=238.0,
+        filled_qty=7.0,
+        created_ts=now - 10.0,
+        deadline_ts=now - 5.0,
+        tries=4,
+        status="OPEN",
+        reason="perp_fill",
+        perp_fill_ts=now - 10.0,
+        perp_fill_price=100.0,
+        pending_qty=231.0,
+        pending_order_id="spot-hedge-1",
+        pending_client_oid="HEDGE-pending",
+        pending_price=100.1,
+    )
+
+    assert asyncio.run(
+        oms.unwind_open_hedge_ticket(
+            cycle_id=10,
+            reason="unhedged_exceeded_unwind_hedge_ticket",
+        )
+    )
+
+    unwind_orders = [order for order in gateway.orders if order.intent == OrderIntent.UNWIND]
+    flatten_orders = [order for order in gateway.orders if order.intent == OrderIntent.FLATTEN]
+    assert len(unwind_orders) == 1
+    assert unwind_orders[0].inst_type == InstType.USDT_FUTURES
+    assert unwind_orders[0].side == Side.BUY
+    assert unwind_orders[0].size == 231.0
+    assert unwind_orders[0].reduce_only is True
+    assert flatten_orders == []
+    assert oms.has_open_hedge_ticket() is False
+    started = [
+        record
+        for record in orders_logger.records
+        if record.get("reason") == "ticket_unwind_started"
+    ]
+    assert started
+    assert started[-1]["action_taken"] == "unwind_hedge_ticket"
 
 
 def test_flatten_defers_while_hedge_ticket_pending() -> None:

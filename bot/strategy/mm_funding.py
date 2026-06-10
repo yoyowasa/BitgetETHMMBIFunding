@@ -659,6 +659,37 @@ class MMFundingStrategy:
                     tfi,
                 )
                 return
+            unwind_ticket = getattr(self._oms, "unwind_open_hedge_ticket", None)
+            if hedge_ticket is not None and callable(unwind_ticket):
+                self._state = StrategyState.HEDGING
+                unwound = await unwind_ticket(
+                    self._cycle_id,
+                    reason="unhedged_exceeded_unwind_hedge_ticket",
+                )
+                if unwound:
+                    self._log_unhedged_exceeded(
+                        now=now,
+                        unhedged_notional=unhedged_notional,
+                        hedge_ticket=hedge_ticket,
+                        action_taken="unwind_hedge_ticket",
+                        reason="unhedged_exceeded_unwind_hedge_ticket",
+                        spot_pos=spot_pos,
+                        perp_pos=perp_pos,
+                        delta=delta,
+                    )
+                    self._log_decision(
+                        now,
+                        spot_bbo,
+                        perp_bbo,
+                        funding.funding_rate,
+                        basis,
+                        obi_spot,
+                        obi_perp,
+                        target_q,
+                        "unhedged_exceeded_unwind_hedge_ticket",
+                        tfi,
+                    )
+                    return
             self._log_unhedged_exceeded(
                 now=now,
                 unhedged_notional=unhedged_notional,
