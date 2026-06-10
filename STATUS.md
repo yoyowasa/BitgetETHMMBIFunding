@@ -4772,3 +4772,45 @@ ec1b00a  chore: bulk update after lint & format
 ### 未確定点
 - `SKYAIUSDT` funding window内liveの実約定パスは未確認。
 - `HEDGE_MAX_TRIES=4`, `HEDGE_CHASE_SLIP_BPS=8.5` が実ヘッジ完了率を改善するかは未確認。
+
+---
+
+## 2026-06-10 funding window前 scan / SKYAIUSDT継続候補
+
+### 観測事実
+- 現在時刻確認: `2026-06-10 22:34 JST`
+- 次funding window: `2026-06-11 00:55〜01:05 JST`
+- `config.yaml` 変更なし。
+- read-only確認:
+  - `SKYAIUSDT`: `SPOT open orders=0`, `Futures open orders=0`, `Futures position=0.0`, `SPOT available=0.004`, `frozen=0.0`
+- ask-edge scan:
+  - `SKYAIUSDT`: `ask_side_edge_bps=66.43`, `funding_bps=4.88`, `spot_quote_volume=7221717`, `perp_quote_volume=5259038`
+  - `JCTUSDT`: `ask_side_edge_bps=26.36`, `funding_bps=2.56`, `spot_quote_volume=4055459`, `perp_quote_volume=12131891`
+  - `USUSDT`: `ask_side_edge_bps=33.71`, `funding_bps=0.5`, `spot_quote_volume=2330615`, `perp_quote_volume=6709183`
+- 対象log: `runtime_logs\dry_symbol_SKYAIUSDT_funding_window_only_2min_20260610_223604`
+  - 条件: `SYMBOL=SKYAIUSDT`, `BASE_HALF_SPREAD_BPS=14`, `MIN_HALF_SPREAD_BPS=14`, `TFI_FADE_POLICY=threshold_0p7`, `ONE_SIDED_QUOTE_POLICY=tfi_0p8`, `CARRY_ENTRY_FUNDING_WINDOW_ONLY=1`, `HEDGE_MAX_TRIES=4`, `HEDGE_CHASE_SLIP_BPS=8.5`
+  - `funding_window_off=330`
+  - `pre_quote_blocks.funding_window_off=165`
+  - `expected_edge_bps=4.01`
+  - `funding_bps=4.81`
+  - `order_resp_codes={}`
+  - `fill_count=0`
+  - `pnl_net_sum=0.0`
+  - 終了後read-onlyで `open orders=0`, `Futures position=0.0`
+
+### 推論
+- `SKYAIUSDT` は前回に続き、ASK edge / funding / 流動性の組み合わせで最有力。
+- `CARRY_ENTRY_FUNDING_WINDOW_ONLY=1` はwindow外で意図通り新規quoteを止めている。
+- 次は `2026-06-11 00:55 JST` 以降に `SKYAIUSDT` live bounded 5分で実約定パスを確認する段階。
+
+### 実装
+- 追加実装なし。
+- `config.yaml` 変更なし。
+
+### 検証
+- `SKYAIUSDT` DRY 2分はgraceful shutdown。
+- 終了後read-onlyで `open orders=0`, `Futures position=0.0` を確認。
+
+### 未確定点
+- funding window内liveの `QUOTE_ASK -> SPOT:HEDGE -> hold/exit` 実績は未確認。
+- liveで `HEDGE_MAX_TRIES=4`, `HEDGE_CHASE_SLIP_BPS=8.5` が未ヘッジflattenを減らすかは未確認。
