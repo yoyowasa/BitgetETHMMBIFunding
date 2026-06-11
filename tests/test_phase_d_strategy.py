@@ -298,6 +298,7 @@ def test_carry_exit_loss_cut_flattens_before_quote(monkeypatch) -> None:
     config.strategy.carry_exit_enabled = True
     config.strategy.carry_exit_max_loss_bps = 5.0
     config.strategy.carry_exit_min_hold_sec = 0.0
+    config.strategy.carry_exit_loss_cut_grace_sec = 0.0
     oms = DummyOMS(spot_available=1804.19)
     oms.positions.spot_pos = 1804.19
     oms.positions.perp_pos = -1806.0
@@ -315,7 +316,12 @@ def test_carry_exit_loss_cut_flattens_before_quote(monkeypatch) -> None:
 
     assert oms.flatten_calls == [{"cycle_id": 1, "reason": "carry_exit_loss_cut"}]
     assert oms.last_update_quotes is None
-    exits = [record for record in logger.records if record.get("reason") == "carry_exit_loss_cut"]
+    exits = [
+        record
+        for record in logger.records
+        if record.get("reason") == "carry_exit_loss_cut"
+        and record.get("action_taken") == "flatten"
+    ]
     assert exits
     assert exits[0]["gross_roundtrip_bps"] <= -config.strategy.carry_exit_max_loss_bps
 
@@ -386,6 +392,130 @@ def test_carry_exit_holds_fee_only_loss_outside_funding_window(monkeypatch) -> N
 
     assert oms.flatten_calls == []
     assert "carry_exit_loss_cut" not in oms.cancel_reasons
+
+
+def test_carry_exit_holds_loss_during_post_funding_grace(monkeypatch) -> None:
+    from bot.strategy import mm_funding as module
+
+    monkeypatch.setattr(module.book_md, "snapshot_from_store", _snapshot_from_store)
+    monkeypatch.setattr(module.book_md, "calc_mid", lambda bbo: (bbo.bid + bbo.ask) / 2.0)
+    monkeypatch.setattr(module.book_md, "calc_microprice", lambda bbo: (bbo.bid + bbo.ask) / 2.0)
+    monkeypatch.setattr(module.book_md, "calc_obi", lambda snapshot: 0.0)
+
+    config = _config()
+    config.strategy.carry_exit_enabled = True
+    config.strategy.carry_exit_max_loss_bps = 5.0
+    config.strategy.carry_exit_min_hold_sec = 0.0
+    config.strategy.carry_exit_loss_cut_grace_sec = 180.0
+    oms = DummyOMS(spot_available=432.57)
+    oms.positions.spot_pos = 432.57
+    oms.positions.perp_pos = -433.0
+    oms.carry_snapshot = SimpleNamespace(
+        entry_gross_pnl_usdt=0.70113,
+        entry_qty=433.0,
+        entry_ts=time.time() - 600.0,
+    )
+    funding_cache = SimpleNamespace(
+        last=FundingInfo(
+            funding_rate=0.000706,
+            next_update_time=None,
+            interval_sec=None,
+            ts=time.time(),
+        )
+    )
+    logger = DummyLogger()
+    strategy = MMFundingStrategy(config, funding_cache, oms, DummyRisk(), logger)
+    monkeypatch.setattr(strategy, "_in_funding_window", lambda now: False)
+    monkeypatch.setattr(strategy, "_seconds_since_funding_settle", lambda now: 2.0)
+
+    import asyncio
+
+    exited = asyncio.run(
+        strategy._maybe_exit_carry_position(
+            now=time.time(),
+            spot_bbo=SimpleNamespace(bid=0.22580, ask=0.22581),
+            perp_bbo=SimpleNamespace(bid=0.22781, ask=0.22782),
+            funding_rate=0.000706,
+            basis=0.00159,
+            obi_spot=0.0,
+            obi_perp=0.0,
+            target_q=220.0,
+            tfi=0.0,
+        )
+    )
+
+    assert exited is False
+    assert oms.flatten_calls == []
+    holds = [
+        record
+        for record in logger.records
+        if record.get("reason") == "carry_exit_hold_post_funding_grace"
+    ]
+    assert holds
+    assert holds[-1]["action_taken"] == "hold"
+    assert holds[-1]["seconds_since_funding_settle"] == 2.0
+
+
+def test_carry_exit_loss_cut_after_post_funding_grace(monkeypatch) -> None:
+    from bot.strategy import mm_funding as module
+
+    monkeypatch.setattr(module.book_md, "snapshot_from_store", _snapshot_from_store)
+    monkeypatch.setattr(module.book_md, "calc_mid", lambda bbo: (bbo.bid + bbo.ask) / 2.0)
+    monkeypatch.setattr(module.book_md, "calc_microprice", lambda bbo: (bbo.bid + bbo.ask) / 2.0)
+    monkeypatch.setattr(module.book_md, "calc_obi", lambda snapshot: 0.0)
+
+    config = _config()
+    config.strategy.carry_exit_enabled = True
+    config.strategy.carry_exit_max_loss_bps = 5.0
+    config.strategy.carry_exit_min_hold_sec = 0.0
+    config.strategy.carry_exit_loss_cut_grace_sec = 1.0
+    oms = DummyOMS(spot_available=432.57)
+    oms.positions.spot_pos = 432.57
+    oms.positions.perp_pos = -433.0
+    oms.carry_snapshot = SimpleNamespace(
+        entry_gross_pnl_usdt=0.70113,
+        entry_qty=433.0,
+        entry_ts=time.time() - 600.0,
+    )
+    funding_cache = SimpleNamespace(
+        last=FundingInfo(
+            funding_rate=0.000706,
+            next_update_time=None,
+            interval_sec=None,
+            ts=time.time(),
+        )
+    )
+    logger = DummyLogger()
+    strategy = MMFundingStrategy(config, funding_cache, oms, DummyRisk(), logger)
+    monkeypatch.setattr(strategy, "_in_funding_window", lambda now: False)
+    monkeypatch.setattr(strategy, "_seconds_since_funding_settle", lambda now: 200.0)
+
+    import asyncio
+
+    exited = asyncio.run(
+        strategy._maybe_exit_carry_position(
+            now=time.time(),
+            spot_bbo=SimpleNamespace(bid=0.22580, ask=0.22581),
+            perp_bbo=SimpleNamespace(bid=0.22781, ask=0.22782),
+            funding_rate=0.000706,
+            basis=0.00159,
+            obi_spot=0.0,
+            obi_perp=0.0,
+            target_q=220.0,
+            tfi=0.0,
+        )
+    )
+
+    assert exited is True
+    assert oms.flatten_calls == [{"cycle_id": 0, "reason": "carry_exit_loss_cut"}]
+    exits = [
+        record
+        for record in logger.records
+        if record.get("reason") == "carry_exit_loss_cut"
+        and record.get("action_taken") == "flatten"
+    ]
+    assert exits
+    assert exits[-1]["seconds_since_funding_settle"] == 200.0
 
 
 def test_carry_exit_holds_fee_only_loss_inside_funding_window(monkeypatch) -> None:

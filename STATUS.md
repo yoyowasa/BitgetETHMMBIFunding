@@ -4916,3 +4916,40 @@ ec1b00a  chore: bulk update after lint & format
 ### 未確定点
 - `unhedged_exceeded_unwind_hedge_ticket` は今回発生せず、実約定検証は未完了。
 - 次の収益化課題は、funding後のexitをshutdown任せにせず、`total_est_net_bps >= 0` などの有利exitまで待つ条件を検証すること。
+
+---
+
+## 2026-06-12 P0 post-funding exit grace 実装
+
+### 観測事実
+- `SKYAIUSDT` funding window live 10分では entry edge は成立したが、funding後の shutdown flatten で小幅マイナス化。
+- `CARRY_EXIT_ENABLED=0` だったため、通常のcarry exit実約定パスは未検証。
+- `config.yaml` 変更なし。
+
+### 推論
+- funding直後に basis が悪い状態で `carry_exit_loss_cut` / `carry_exit_profit_eroded` を即時発火させると、entry粗利とfunding受取をspot/perp exit costで食い潰す。
+- 一方、`carry_exit_take_profit` は有利exitなのでgrace中でも許可する。
+
+### 実装
+- `bot/config.py`
+  - `StrategyConfig.carry_exit_loss_cut_grace_sec` を追加。既定値 `180.0`。
+  - env override `CARRY_EXIT_LOSS_CUT_GRACE_SEC` を追加。
+- `bot/strategy/mm_funding.py`
+  - funding settlement後のgrace中は `carry_exit_loss_cut` / `carry_exit_profit_eroded` を抑制。
+  - grace中の不利exit抑制を `carry_exit_hold_post_funding_grace` として risk log に出力。
+  - `carry_exit_take_profit` はgrace中も発火可能。
+  - exit log に `seconds_since_funding_settle`, `carry_exit_loss_cut_grace_sec` を追加。
+- `tests/test_config_apis.py`
+  - `CARRY_EXIT_LOSS_CUT_GRACE_SEC` override を固定。
+- `tests/test_phase_d_strategy.py`
+  - funding直後grace中は不利exitをholdするテストを追加。
+  - grace後は `carry_exit_loss_cut` でflattenするテストを追加。
+
+### 検証
+- `pytest tests\test_phase_d_strategy.py tests\test_config_apis.py -q`: `13 passed`
+- `pytest -q`: `141 passed`
+- `git diff -- config.yaml`: 差分なし
+
+### 未確定点
+- `CARRY_EXIT_LOSS_CUT_GRACE_SEC=180` の実運用最適値は未確定。
+- 次回 bounded/live で `carry_exit_hold_post_funding_grace` と `carry_exit_take_profit` の実ログ確認が必要。

@@ -2035,10 +2035,24 @@ class MMFundingStrategy:
         gross_roundtrip_bps = gross_roundtrip_usdt / notional * 10000.0
         in_funding_window = self._in_funding_window(now)
         outside_window = not in_funding_window or not cfg.carry_exit_hold_funding_window
-        loss_cut = gross_roundtrip_bps <= -abs(cfg.carry_exit_max_loss_bps)
+        seconds_since_funding_settle = self._seconds_since_funding_settle(now)
+        post_funding_grace_active = (
+            outside_window
+            and seconds_since_funding_settle is not None
+            and seconds_since_funding_settle < cfg.carry_exit_loss_cut_grace_sec
+        )
+        loss_cut = (
+            outside_window
+            and not post_funding_grace_active
+            and gross_roundtrip_bps <= -abs(cfg.carry_exit_max_loss_bps)
+        )
         loss_cut_basis = "gross_basis"
         take_profit = outside_window and total_est_net_bps >= cfg.carry_exit_min_net_bps
-        profit_eroded = outside_window and gross_roundtrip_bps <= cfg.carry_exit_min_net_bps
+        profit_eroded = (
+            outside_window
+            and not post_funding_grace_active
+            and gross_roundtrip_bps <= cfg.carry_exit_min_net_bps
+        )
         if loss_cut:
             reason = "carry_exit_loss_cut"
         elif take_profit:
@@ -2046,6 +2060,40 @@ class MMFundingStrategy:
         elif profit_eroded:
             reason = "carry_exit_profit_eroded"
         else:
+            if outside_window and post_funding_grace_active:
+                self._decision_logger.log(
+                    {
+                        "ts": now,
+                        "event": "risk",
+                        "intent": "HOLD",
+                        "source": "strategy",
+                        "mode": self._state.value,
+                        "reason": "carry_exit_hold_post_funding_grace",
+                        "leg": "positions",
+                        "cycle_id": self._cycle_id,
+                        "action_taken": "hold",
+                        "exit_side": exit_side,
+                        "qty": qty,
+                        "age_sec": age_sec,
+                        "entry_gross_pnl_usdt": snapshot.entry_gross_pnl_usdt,
+                        "exit_gross_pnl_usdt": exit_gross_pnl_usdt,
+                        "exit_fee_usdt_est": exit_fee_usdt_est,
+                        "gross_roundtrip_usdt": gross_roundtrip_usdt,
+                        "gross_roundtrip_bps": gross_roundtrip_bps,
+                        "total_est_net_usdt": total_est_net_usdt,
+                        "total_est_net_bps": total_est_net_bps,
+                        "in_funding_window": in_funding_window,
+                        "seconds_since_funding_settle": seconds_since_funding_settle,
+                        "carry_exit_loss_cut_grace_sec": cfg.carry_exit_loss_cut_grace_sec,
+                        "spot_pos": spot_pos,
+                        "perp_pos": perp_pos,
+                        "delta": spot_pos + perp_pos,
+                        "spot_bid": spot_bbo.bid,
+                        "spot_ask": spot_bbo.ask,
+                        "perp_bid": perp_bbo.bid,
+                        "perp_ask": perp_bbo.ask,
+                    }
+                )
             return False
 
         self._state = StrategyState.FLATTENING
@@ -2075,6 +2123,8 @@ class MMFundingStrategy:
                 "carry_exit_min_net_bps": cfg.carry_exit_min_net_bps,
                 "carry_exit_max_loss_bps": cfg.carry_exit_max_loss_bps,
                 "in_funding_window": in_funding_window,
+                "seconds_since_funding_settle": seconds_since_funding_settle,
+                "carry_exit_loss_cut_grace_sec": cfg.carry_exit_loss_cut_grace_sec,
                 "spot_pos": spot_pos,
                 "perp_pos": perp_pos,
                 "delta": spot_pos + perp_pos,
@@ -2107,3 +2157,12 @@ class MMFundingStrategy:
             if abs(sec_of_day - settle_sec) <= self._config.strategy.funding_window_sec:
                 return True
         return False
+
+    def _seconds_since_funding_settle(self, now: float) -> float | None:
+        dt = datetime.fromtimestamp(now, tz=timezone.utc)
+        sec_of_day = dt.hour * 3600 + dt.minute * 60 + dt.second
+        settle_secs = (0, 8 * 3600, 16 * 3600)
+        elapsed = [sec_of_day - settle for settle in settle_secs if sec_of_day >= settle]
+        if not elapsed:
+            return None
+        return float(min(elapsed, key=abs))

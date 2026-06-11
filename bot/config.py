@@ -85,6 +85,7 @@ class StrategyConfig:
     carry_exit_max_loss_bps: float = 5.0
     carry_exit_min_hold_sec: float = 2.0
     carry_exit_hold_funding_window: bool = True
+    carry_exit_loss_cut_grace_sec: float = 180.0
     carry_entry_funding_window_only: bool = False
     dry_run: bool = False
 
@@ -284,6 +285,10 @@ def apply_env_overrides(config: AppConfig) -> None:
     carry_exit_hold_funding_window = _env_bool("CARRY_EXIT_HOLD_FUNDING_WINDOW")
     if carry_exit_hold_funding_window is not None:
         config.strategy.carry_exit_hold_funding_window = carry_exit_hold_funding_window
+
+    carry_exit_loss_cut_grace_sec = _env_float("CARRY_EXIT_LOSS_CUT_GRACE_SEC")
+    if carry_exit_loss_cut_grace_sec is not None:
+        config.strategy.carry_exit_loss_cut_grace_sec = carry_exit_loss_cut_grace_sec
 
     carry_entry_funding_window_only = _env_bool("CARRY_ENTRY_FUNDING_WINDOW_ONLY")
     if carry_entry_funding_window_only is not None:
