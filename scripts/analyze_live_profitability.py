@@ -83,6 +83,45 @@ def _rough_pair_pnl(fills: list[dict]) -> list[dict]:
     return pairs
 
 
+def _fill_cashflow_summary(fills: list[dict]) -> dict:
+    by_inst: dict[str, float] = defaultdict(float)
+    by_intent: dict[str, float] = defaultdict(float)
+    gross = 0.0
+    usdt_fee_abs = 0.0
+    base_fee_qty: dict[str, float] = defaultdict(float)
+    for fill in fills:
+        price = _float(fill.get("price"))
+        size = _float(fill.get("size"))
+        notional = price * size
+        if fill.get("side") == "sell":
+            signed = notional
+        elif fill.get("side") == "buy":
+            signed = -notional
+        else:
+            signed = 0.0
+        inst_type = str(fill.get("inst_type"))
+        intent = str(fill.get("intent"))
+        by_inst[inst_type] += signed
+        by_intent[f"{inst_type}:{intent}"] += signed
+        gross += signed
+
+        fee = _float(fill.get("fee"))
+        fee_coin = str(fill.get("fee_coin") or "").upper()
+        if fee_coin == "USDT":
+            usdt_fee_abs += abs(fee)
+        elif fee_coin:
+            base_fee_qty[fee_coin] += abs(fee)
+
+    return {
+        "realized_cashflow_by_inst": dict(by_inst),
+        "realized_cashflow_by_intent": dict(by_intent),
+        "realized_gross_cashflow_usdt": gross,
+        "realized_fee_usdt_observed_abs": usdt_fee_abs,
+        "realized_cashflow_after_usdt_fees": gross - usdt_fee_abs,
+        "realized_base_fee_qty": dict(base_fee_qty),
+    }
+
+
 def analyze(log_dir: Path) -> dict:
     event_counts: Counter[str] = Counter()
     reason_counts: Counter[str] = Counter()
@@ -142,6 +181,11 @@ def analyze(log_dir: Path) -> dict:
             )
         )
     ]
+    cashflow = _fill_cashflow_summary(fills)
+    repeated_unrealized_basis = (
+        len(pnl_rows) > 1
+        and sum(1 for row in pnl_rows if abs(_float(row.get("basis_pnl"))) > 1e-12) > 1
+    )
     return {
         "log_dir": str(log_dir),
         "duration_sec": None if first_ts is None or last_ts is None else last_ts - first_ts,
@@ -153,9 +197,11 @@ def analyze(log_dir: Path) -> dict:
         "fill_by_intent": dict(fill_by_intent),
         "rough_pairs": pair_rows,
         "rough_pair_net_usdt_known": sum(row["net_usdt_known"] for row in pair_rows),
+        **cashflow,
         "pnl_rows": len(pnl_rows),
         "pnl_nonzero_rows": len(nonzero_pnl),
         "pnl_net_sum": sum(_float(row.get("net_pnl")) for row in pnl_rows),
+        "pnl_net_sum_repeats_unrealized_basis": repeated_unrealized_basis,
     }
 
 

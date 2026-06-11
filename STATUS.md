@@ -4862,3 +4862,57 @@ ec1b00a  chore: bulk update after lint & format
 ### 未確定点
 - 修正後のfunding window liveで `unhedged_exceeded_unwind_hedge_ticket -> UNWIND -> carry維持` が実約定で成立するかは未確認。
 - `carry_exit_loss_cut` の閾値は別途、funding settlement前後10分runで再評価が必要。
+
+---
+
+## 2026-06-12 SKYAIUSDT unwind修正後 funding window live 10分
+
+### 観測事実
+- 実行時刻: `2026-06-12 00:55〜01:05 JST`
+- 対象log: `runtime_logs\live_symbol_SKYAIUSDT_unwind_fix_funding_window_10min_20260612_005501`
+- 条件: `SYMBOL=SKYAIUSDT`, `DRY_RUN=0`, `BASE_HALF_SPREAD_BPS=14`, `MIN_HALF_SPREAD_BPS=14`, `SIDE_EDGE_GUARD=1`, `TFI_FADE_POLICY=threshold_0p7`, `ONE_SIDED_QUOTE_POLICY=tfi_0p8`, `CARRY_ENTRY_FUNDING_WINDOW_ONLY=1`, `HEDGE_MAX_TRIES=4`, `HEDGE_CHASE_SLIP_BPS=8.5`, `CARRY_EXIT_ENABLED=0`
+- 起動前read-only: `SPOT open orders=0`, `Futures open orders=0`, `Futures position=0.0`, `SPOT SKYAI available=0.007`, `frozen=0.0`
+- 終了後read-only: `SPOT open orders=0`, `Futures open orders=0`, `Futures position=0.0`, `SPOT SKYAI available=0.004`, `frozen=0.0`
+- `shutdown_flatten_positions_done=1`, `shutdown_cancel_all_done=1`
+- `order_reject=0`, `fill_parse_warning=0`, `resp_code 22002=0`, `shutdown_cancel_all_failed=0`
+- fills:
+  - `USDT-FUTURES:QUOTE_ASK`: 3 fills / sell `433.0`
+  - `SPOT:HEDGE`: 3 fills / buy `433.0`
+  - `USDT-FUTURES:FLATTEN`: 2 fills / buy `433.0`
+  - `SPOT:FLATTEN`: 1 fill / sell `432.57`
+- hedge ticket は3件とも `ticket_done`。今回 `unhedged_exceeded_unwind_hedge_ticket` 実約定パスは発生せず。
+- entry再構成:
+  - `rough_pair_net_usdt_known=+0.68728186`
+- fill cashflow再構成:
+  - `realized_gross_cashflow_usdt=-0.0889446`
+  - `realized_fee_usdt_observed_abs=0.15313547`
+  - `realized_cashflow_after_usdt_fees=-0.24208007`
+  - `realized_base_fee_qty={"SKYAI":0.433}`
+- futures account bill read-only:
+  - `contract_settle_fee amount=+0.06772224 USDT`
+  - futures close realized amount合計 `+0.26933000 USDT`
+  - futures fee合計 `-0.05527948 USDT`
+- analyzer旧指標 `pnl_net_sum=-6.275158011584997` は `basis_pnl` の1分ごと未実現値を重複加算するため、実損として扱わない。
+
+### 推論
+- entry edge は今回も成立。
+- 実損推定は `pnl_net_sum` ではなく、fills再構成とaccount billを優先する。
+- funding受取後でも、shutdown時のspot/perp exit basisとspot feeで小幅マイナス。
+- 今回はhedgeが全完了したため、`6e2db3b` の `UNWIND only` 修正は実約定では未検証。
+
+### 実装
+- `scripts/analyze_live_profitability.py`
+  - fills由来の `realized_cashflow_by_inst`, `realized_cashflow_by_intent`, `realized_gross_cashflow_usdt`, `realized_fee_usdt_observed_abs`, `realized_cashflow_after_usdt_fees`, `realized_base_fee_qty` を追加。
+  - `pnl_net_sum_repeats_unrealized_basis` を追加。
+- `tests/test_analyze_live_profitability.py`
+  - realized cashflow と repeated unrealized basis の回帰テストを追加。
+- `config.yaml` 変更なし。
+
+### 検証
+- `pytest tests\test_analyze_live_profitability.py -q`: `2 passed`
+- `pytest -q`: `139 passed`
+- `git diff -- config.yaml`: 差分なし
+
+### 未確定点
+- `unhedged_exceeded_unwind_hedge_ticket` は今回発生せず、実約定検証は未完了。
+- 次の収益化課題は、funding後のexitをshutdown任せにせず、`total_est_net_bps >= 0` などの有利exitまで待つ条件を検証すること。
