@@ -68,6 +68,22 @@ class MMFundingStrategy:
         now = time.time()
 
         if self._risk.is_halted():
+            halt_reason = getattr(self._risk, "halt_reason", None)
+            if halt_reason == "shutdown":
+                if self._state != StrategyState.STOPPED:
+                    self._state = StrategyState.STOPPED
+                    self._log_decision(
+                        now,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        "shutdown_halt",
+                    )
+                return
             if self._state != StrategyState.HALTED:
                 self._state = StrategyState.HALTED
                 self._oms.fail_open_tickets("halt")

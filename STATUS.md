@@ -4982,3 +4982,32 @@ ec1b00a  chore: bulk update after lint & format
 
 ### 未確定点
 - 修正後のlive boundedで `shutdown_flatten_positions_skip_flat` が出て `order_skip FLATTEN` / `HALTED` が消えることは次回確認。
+
+---
+
+## 2026-06-12 shutdown halt decision 分離
+
+### 観測事実
+- `live_shutdown_dust_skip_verify_20260612_182004` では `shutdown_flatten_positions_skip_flat=1`, `order_skip FLATTEN=0`, `spot_flatten_available_precheck=0`。
+- 同runで `HALTED=1` が残ったが、該当は shutdown signal 後に strategy task が `risk.halt("shutdown")` を通常haltとして1 tick記録したもの。
+- 終了後read-onlyは `spot_open_orders=0`, `futures_open_orders=0`, `futures_position=0.0`, `SPOT ETH available=0.000120000718`, `frozen=0.0`。
+- `config.yaml` 変更なし。
+
+### 推論
+- `shutdown` は異常haltではなく graceful shutdown の制御信号。
+- 通常の `HALTED` と同じ decision log にすると bounded/live 判定の `HALTED=0` を汚す。
+
+### 実装
+- `bot/strategy/mm_funding.py`
+  - `risk.halt_reason == "shutdown"` の場合は `StrategyState.HALTED` に入れず、`STOPPED` / `shutdown_halt` として記録。
+  - `reject_streak` 等の通常haltは従来どおり `HALTED`。
+- `tests/test_phase_d_strategy.py`
+  - shutdown haltで `cancel_all("halted")` と `mode=HALTED` decisionを出さない回帰テストを追加。
+
+### 検証
+- `pytest tests\test_phase_d_strategy.py tests\test_stop_bot_scripts.py -q`: `19 passed`
+- `pytest -q`: `143 passed`
+- `git diff -- config.yaml`: 差分なし
+
+### 未確定点
+- 修正後の live bounded で `HALTED=0` に戻ることは次回確認。

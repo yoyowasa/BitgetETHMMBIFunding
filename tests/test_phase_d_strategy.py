@@ -4,7 +4,7 @@ import time
 from types import SimpleNamespace
 
 from bot.config import AppConfig, CostConfig, ExchangeConfig, HedgeConfig, RiskConfig, StrategyConfig, SymbolConfig, SymbolsConfig
-from bot.strategy.mm_funding import MMFundingStrategy
+from bot.strategy.mm_funding import MMFundingStrategy, StrategyState
 from bot.types import FundingInfo, InstType
 
 
@@ -90,6 +90,13 @@ class DummyRisk:
         return False
 
 
+class ShutdownRisk(DummyRisk):
+    halt_reason = "shutdown"
+
+    def is_halted(self) -> bool:
+        return True
+
+
 def _config() -> AppConfig:
     return AppConfig(
         exchange=ExchangeConfig(name="bitget", base_url="", ws_public="", ws_private=""),
@@ -118,6 +125,26 @@ def _config() -> AppConfig:
         hedge=HedgeConfig(use_spot_limit_ioc=True, hedge_aggressive_bps=5.0),
         cost=CostConfig(fee_maker_perp_bps=2.0, fee_taker_spot_bps=10.0, slippage_bps=2.0),
     )
+
+
+def test_shutdown_halt_does_not_emit_halted_decision() -> None:
+    funding_cache = SimpleNamespace(last=None)
+    oms = DummyOMS()
+    logger = DummyLogger()
+    strategy = MMFundingStrategy(_config(), funding_cache, oms, ShutdownRisk(), logger)
+    strategy._state = StrategyState.QUOTING
+
+    import asyncio
+
+    asyncio.run(strategy.step())
+
+    assert oms.cancel_reasons == []
+    assert [record for record in logger.records if record.get("mode") == "HALTED"] == []
+    shutdown_records = [
+        record for record in logger.records if record.get("action") == "shutdown_halt"
+    ]
+    assert shutdown_records
+    assert shutdown_records[-1]["state"] == "STOPPED"
 
 
 def _snapshot_from_store(store, inst_type: InstType, symbol: str, levels: int, channel=None, return_meta=False):
