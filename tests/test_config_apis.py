@@ -108,6 +108,7 @@ def test_apply_env_overrides_runtime_strategy_params(
     monkeypatch.setenv("HEDGE_CHASE_SLIP_BPS", "8.5")
     monkeypatch.setenv("CARRY_ENTRY_FUNDING_WINDOW_ONLY", "1")
     monkeypatch.setenv("CARRY_EXIT_LOSS_CUT_GRACE_SEC", "240")
+    monkeypatch.setenv("MIN_FUNDING_RATE", "0.00025")
 
     apply_env_overrides(config)
 
@@ -126,4 +127,16 @@ def test_apply_env_overrides_runtime_strategy_params(
     assert config.hedge.hedge_chase_slip_bps == 8.5
     assert config.strategy.carry_entry_funding_window_only is True
     assert config.strategy.carry_exit_loss_cut_grace_sec == 240.0
+    assert config.strategy.min_funding_rate == 0.00025
+
+
+def test_apply_env_overrides_min_abs_funding_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _app_config()
+    monkeypatch.setenv("MIN_ABS_FUNDING", "0.0003")
+
+    apply_env_overrides(config)
+
+    assert config.strategy.min_funding_rate == 0.0003
 

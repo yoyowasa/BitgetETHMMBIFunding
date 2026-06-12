@@ -266,6 +266,12 @@ def apply_env_overrides(config: AppConfig) -> None:
     if side_edge_min_bps is not None:
         config.strategy.side_edge_min_bps = side_edge_min_bps
 
+    min_funding_rate = _env_float("MIN_FUNDING_RATE")
+    if min_funding_rate is None:
+        min_funding_rate = _env_float("MIN_ABS_FUNDING")
+    if min_funding_rate is not None:
+        config.strategy.min_funding_rate = min_funding_rate
+
     carry_exit_enabled = _env_bool("CARRY_EXIT_ENABLED")
     if carry_exit_enabled is not None:
         config.strategy.carry_exit_enabled = carry_exit_enabled

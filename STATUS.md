@@ -5011,3 +5011,40 @@ ec1b00a  chore: bulk update after lint & format
 
 ### 未確定点
 - 修正後の live bounded で `HALTED=0` に戻ることは次回確認。
+
+---
+
+## 2026-06-13 SKYAI funding window 実収益分析 / min funding env 修正
+
+### 観測事実
+- 対象ログ: `runtime_logs\live_skyai_post_funding_grace_75min_20260612_230130`
+  - `HALTED=0`, `order_reject=0`, `shutdown_cancel_all_done=1`, `fill_count=0`。
+  - `QUOTE_FADE_POLICY` 未指定のため `quote_fade` が支配的で、実quote bodyに到達せず。
+- 対象ログ: `runtime_logs\live_skyai_quote_fade_disabled_next_funding_20260613_001902`
+  - `HALTED=0`, `order_reject=0`, `fill_parse_warning=0`, `resp_code 22002=0`, `shutdown_cancel_all_done=1`。
+  - 実口座read-only: `SPOT open orders=0`, `Futures open orders=0`, `Futures position=0.0`, `SPOT SKYAI available=0.011`, `frozen=0`。
+  - fill: `QUOTE_ASK=4`, `SPOT:HEDGE=4`, `USDT-FUTURES:FLATTEN=2`, `SPOT:FLATTEN=1`。
+  - entry rough pair net: `+0.25907401 USDT`。entry gross log: `+0.45998 USDT`。
+  - `carry_exit_loss_cut` が funding settle 後 `301s` で発火。`gross_roundtrip=-0.12161782 USDT`, `total_est_net=-0.23150773 USDT`。
+  - Bitget futures account bill read-only: `contract_settle_fee=+0.06465719 USDT`。
+  - Spot/Futures bill合算の実口座USDT概算: funding込みで約 `-0.33 USDT`、残SKYAI dust込みでも負。
+  - `order_skip FLATTEN=3` は min notional / delta tolerance 未満の dust skip。残注文・残positionなし。
+
+### 推論
+- entry 時の funding は約 `6.7bps`、basis は約 `47bps`。funding自体は実際に受領できた。
+- 損失主因は fill parse / hedge / shutdown ではなく、post-funding exit 時に basis が改善せず、entry粗利を exit で払い戻したこと。
+- 現行の `expected_edge = spread + funding - cost - buffer` は、carry目的の entry で basis粗利を確定収益として扱いすぎる。
+- 低い funding では roundtrip fee と exit basis悪化を吸収できないため、entry側で `min_funding_rate` を runtime override できる必要がある。
+
+### 実装
+- `bot/config.py`
+  - env override `MIN_FUNDING_RATE` を追加。
+  - 既存 `.env` 互換として `MIN_ABS_FUNDING` も `strategy.min_funding_rate` alias として扱う。
+  - 優先順位は `MIN_FUNDING_RATE` > `MIN_ABS_FUNDING`。
+- `tests/test_config_apis.py`
+  - `MIN_FUNDING_RATE` override テストを追加。
+  - `MIN_ABS_FUNDING` alias テストを追加。
+
+### 未確定点
+- 採用する funding 下限値は未確定。次回は env で `MIN_FUNDING_RATE` を設定し、約定数と正味PnLを再検証する。
+- basis が funding後に収束する銘柄/時間帯の比較は未完了。
