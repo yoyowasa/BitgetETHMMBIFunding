@@ -4,7 +4,7 @@ import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
-from bot.app import _shutdown_position_snapshot
+from bot.app import _flatten_positions_on_shutdown, _shutdown_position_snapshot
 from bot.exchange.constraints import InstrumentConstraints
 from bot.types import InstType
 
@@ -131,3 +131,82 @@ def test_shutdown_position_snapshot_treats_below_min_notional_spot_as_flat(monke
     assert snapshot["flat"] is True
     assert oms.positions.spot_pos == 0.89504
     assert oms.positions.perp_pos == 0.0
+
+
+def test_shutdown_flatten_skips_flat_dust_without_order(monkeypatch) -> None:
+    from bot import app as app_module
+
+    class Logger:
+        def __init__(self) -> None:
+            self.records: list[dict] = []
+
+        def log(self, record: dict) -> None:
+            self.records.append(record)
+
+    class Constraints:
+        def get(self, inst_type: InstType):
+            if inst_type == InstType.SPOT:
+                return InstrumentConstraints(
+                    min_qty=0.0001,
+                    qty_step=0.0001,
+                    min_notional=1.0,
+                    tick_size=0.01,
+                )
+            return None
+
+    class Gateway:
+        constraints = Constraints()
+
+        async def get_spot_available_balance(self, base_coin: str) -> float:
+            assert base_coin == "ETH"
+            return 0.00012
+
+        async def get_perp_position(self) -> float:
+            return 0.0
+
+    class OMS:
+        def __init__(self) -> None:
+            self.positions = SimpleNamespace(spot_pos=0.0, perp_pos=0.0)
+            self.cancel_calls: list[str] = []
+            self.flatten_calls: list[dict] = []
+
+        async def cancel_all(self, reason: str) -> None:
+            self.cancel_calls.append(reason)
+
+        async def flatten(self, spot_bbo, cycle_id: int, reason: str) -> None:
+            self.flatten_calls.append({"cycle_id": cycle_id, "reason": reason})
+
+        async def drain_fills_once(self, source: str) -> int:
+            return 0
+
+    monkeypatch.setenv("SHUTDOWN_FLATTEN_POSITIONS", "1")
+    monkeypatch.setattr(
+        app_module,
+        "_spot_bbo_from_store",
+        lambda gateway, config: SimpleNamespace(bid=1675.0, ask=1675.1),
+    )
+    monkeypatch.setattr(
+        app_module.book_md,
+        "calc_mid",
+        lambda bbo: (bbo.bid + bbo.ask) / 2.0,
+    )
+    oms = OMS()
+    config = SimpleNamespace(
+        symbols=SimpleNamespace(spot=SimpleNamespace(symbol="ETHUSDT")),
+        strategy=SimpleNamespace(delta_tolerance_notional=0.2),
+    )
+    logger = Logger()
+
+    ok = asyncio.run(_flatten_positions_on_shutdown(oms, Gateway(), config, logger))
+
+    assert ok is True
+    assert oms.cancel_calls == ["shutdown_flatten_positions"]
+    assert oms.flatten_calls == []
+    skips = [
+        record
+        for record in logger.records
+        if record.get("event") == "shutdown_flatten_positions_skip_flat"
+    ]
+    assert skips
+    assert skips[-1]["flat"] is True
+    assert skips[-1]["spot_notional"] < skips[-1]["spot_flat_notional_threshold"]

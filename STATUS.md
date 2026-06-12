@@ -4953,3 +4953,32 @@ ec1b00a  chore: bulk update after lint & format
 ### 未確定点
 - `CARRY_EXIT_LOSS_CUT_GRACE_SEC=180` の実運用最適値は未確定。
 - 次回 bounded/live で `carry_exit_hold_post_funding_grace` と `carry_exit_take_profit` の実ログ確認が必要。
+
+---
+
+## 2026-06-12 shutdown dust flatten skip 修正
+
+### 観測事実
+- `dry_post_funding_grace_20260612_180447`: `HALTED=0`, `order_reject=0`, `shutdown_cancel_all_done=1`, `positions_empty=5`, `book_rx_rate=4`。
+- `live_post_funding_grace_startup_20260612_181050`: 終了後read-onlyは `spot_open_orders=0`, `futures_open_orders=0`, `futures_position=0.0`, `SPOT ETH available=0.000120000718`, `frozen=0.0`。
+- 同liveで shutdown 時に `shutdown_flatten_positions_check flat=true` 後、ETH dust `0.000120000718` に対して `SPOT:FLATTEN order_skip blocked_constraints` が出た。
+- 実注文は残らず、口座状態はclean。
+- `config.yaml` 変更なし。
+
+### 推論
+- `_shutdown_position_snapshot()` は min notional 未満のspot dustをflat扱いしているが、`_flatten_positions_on_shutdown()` がその `flat=true` を見ずに `oms.flatten()` を呼んでいた。
+- そのため、実質flatのdustでも不要な flatten 試行と `HALTED` tick が発生し、監視上のノイズになった。
+
+### 実装
+- `bot/app.py`
+  - shutdown loop内で snapshot が `flat=true` の場合、`oms.flatten()` を呼ばずに `shutdown_flatten_positions_skip_flat` を出して終了。
+- `tests/test_stop_bot_scripts.py`
+  - min notional未満のspot dustでは shutdown flatten order を出さない回帰テストを追加。
+
+### 検証
+- `pytest tests\test_stop_bot_scripts.py tests\test_spot_balance_precheck.py -q`: `12 passed`
+- `pytest -q`: `142 passed`
+- `git diff -- config.yaml`: 差分なし
+
+### 未確定点
+- 修正後のlive boundedで `shutdown_flatten_positions_skip_flat` が出て `order_skip FLATTEN` / `HALTED` が消えることは次回確認。

@@ -365,7 +365,22 @@ async def _flatten_positions_on_shutdown(oms, gateway, config, logger) -> bool:
                     }
                 )
                 return False
-            await _shutdown_position_snapshot(oms, gateway, config, logger)
+            snapshot = await _shutdown_position_snapshot(oms, gateway, config, logger)
+            if snapshot["flat"]:
+                logger.log(
+                    {
+                        "event": "shutdown_flatten_positions_skip_flat",
+                        "intent": "SYSTEM",
+                        "source": "shutdown",
+                        "mode": "SHUTDOWN",
+                        "reason": "shutdown_flatten_positions_already_flat",
+                        "leg": "positions",
+                        "attempt": attempt,
+                        **snapshot,
+                    }
+                )
+                final_snapshot = snapshot
+                break
             await oms.flatten(spot_bbo, cycle_id=-attempt, reason=reason)
             await asyncio.sleep(wait_sec)
             drain = getattr(oms, "drain_fills_once", None)
